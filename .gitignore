@@ -1,12 +1,25 @@
 .workbuddy/
 
+# ===== 库数据（私人内容，不随技能仓库发布；仓库只含 outline-maintainer/ 与 README）=====
+大纲.md
+日志.md
+日志归档.md
+知识/
+
 # 原始素材（PDF / 图片 / 视频 / 转写稿）不进 git
 素材/
 
 # 派生索引（可由 build_index.py 随时重建，不进版本库）
 索引/
 
+# 解析产物缓存（material-parser 生成，可随时删除重建，不进版本库）
+解析缓存/
+
+# 落盘互斥锁（write_lock.py 生成，租期制短暂存在，不进版本库）
+.写入锁
+
 # 系统杂项
 Thumbs.db
 desktop.ini
 .DS_Store
+__pycache__/

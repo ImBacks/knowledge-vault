@@ -1,0 +1,12 @@
+# material-parser 可选依赖——按用途装，不必全装（--doctor 会按用途报缺哪些 + 精确命令）
+# 用途A：解析 PDF（文本层 + 扫描页 OCR）——只装 A 组即可
+pymupdf>=1.24
+rapidocr>=2.0
+Pillow>=10.0
+numpy
+# 用途B：转写视频/音频（另需 ffmpeg：winget install Gyan.FFmpeg；模型首跑自动下载约 500MB 走 hf-mirror）
+faster-whisper>=1.0
+av>=14.1,<16   # av≥16 移除 metadata_errors，faster-whisper 1.2.x 调它会崩，必须锁
+# 用途C：B站等在线视频（拉字幕 / 下载音频）
+yt-dlp>=2024.10.0
+# 注：rapidocr-onnxruntime（v1 旧包）在 Python 3.13 无发行版，统一用新包 rapidocr

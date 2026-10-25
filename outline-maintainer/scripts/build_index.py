@@ -3,25 +3,35 @@
 """大纲索引器：把 大纲.md 解析成 SQLite + FTS5 索引（派生层）。
 
 用法:
-    python build_index.py <大纲.md 路径>                  # 重建索引
-    python build_index.py <大纲.md 路径> --search "去水印"  # 查候选
-    python build_index.py <大纲.md 路径> --related rea     # 查双向相关（正向+反向）
+    python build_index.py <大纲.md 路径>                    # 重建索引
+    python build_index.py <大纲.md 路径> --search "去水印"    # 全文查候选
+    python build_index.py <大纲.md 路径> --form 插件          # 按形态过滤（主/次形态都算）
+    python build_index.py <大纲.md 路径> --related rea        # 查双向相关（正向+反向）
     python build_index.py <大纲.md 路径> --stats
+
+字段 → 索引的对应关系（不是只有作用，详细/体检与规模.md §19）：
+  FTS 全文（八列，任一命中即召回）：名字 name ｜ 作用短语 phrases ｜ 完整作用 purpose ｜
+      分类 section ｜ 形态 form ｜ 限制 restriction ｜ 来源 source ｜ 别名 aliases
+  B-tree 精确：活 active（idx_active）｜ 核 verified（idx_verified；空串 < 任何日期，
+      ORDER BY verified 天然把「无核」排最前，正合抽查「无核最优先」）
+  不进索引：核（可信度标记，不是检索词）｜ 备注（自由文本，检索数据一律走 `别名` 字段）｜
+      正文内容（命中后照常读文件）
 
 三条设计约束（别破坏，破坏了这套就没意义）：
 1. **大纲.md 是唯一真相。** 本脚本只读它，产物是 `索引/大纲.db`，随时可删、可全量重建。
    丢了 db 不损失任何信息。
 2. **不装中文分词器。** `作用` 字段按格式写成「短语 / 短语 — 说明」，脚本把 `—` 之前
    的部分按 ` / ` 切开、用空格连接后喂给 FTS5 的 unicode61。切分点是人写的短语，
-   所以不需要 jieba，索引也比 trigram 小得多（trigram 约为原文 3–4 倍）。
-3. **查不到就兜底。** 短语精确匹配会漏掉「用户换个说法」的情况，此时退回 LIKE 子串扫描。
-   这是刻意的：召回靠别名池补，不靠分词器猜。`别名：` 字段（§3，；分隔）已与作用短语
-   一起进 FTS 和 LIKE 兜底；`核 YYYY-MM-DD` 只入 entries 表不进 FTS（它是可信度标记，不是检索词）。
+   所以不需要 jieba，主索引也比 trigram 小得多。
+3. **查不到就兜底。** 短语精确匹配会漏掉「用户换个说法」的情况，此时退回 LIKE 子串扫描，
+   扫描列与 FTS 列保持一致（八列）。这是刻意的：召回靠别名池补，不靠分词器猜。LIKE
+   全表扫在几万条内是毫秒级；再大之后换什么、何时换，定论在 详细/体检与规模.md §19「千万档」。
 
-为什么不用 Meilisearch / trigram：
+为什么主索引不用 Meilisearch / trigram：
 - Meilisearch 要多跑一个服务进程，挂了整个库不能查；单机个人库不值得。
 - trigram 对中文免分词，但索引膨胀 3–4 倍、两个字的查询（「改字幕」的「字幕」）会静默返回空，
-  且 bm25 在字符窗口上算出来的排序很噪（排序的是字符窗口，不是词）。
+  且 bm25 在字符窗口上算出来的排序很噪。这些缺点让它不配当**主索引**；但「免分词 + 支持子串」
+  正是兜底层要的能力——百万条后 LIKE 扫不动时，trigram 只对 名字+短语+别名 三列建小表上岗（§19 千万档）。
 """
 
 import re
@@ -58,7 +68,7 @@ CREATE TABLE entries (
 );
 
 CREATE VIRTUAL TABLE entries_fts USING fts5(
-    name, phrases, purpose, section, restriction, aliases,
+    name, phrases, purpose, section, form, restriction, source, aliases,
     tokenize = 'unicode61 remove_diacritics 1'
 );
 
@@ -72,6 +82,8 @@ CREATE TABLE related (
 CREATE INDEX idx_related_tgt ON related(tgt);
 CREATE INDEX idx_related_frm ON related(frm);
 CREATE INDEX idx_active ON entries(active);
+-- 核：抽查按「核」最旧挑、无核最优先。空串 < 任何日期，ORDER BY verified 天然如此。
+CREATE INDEX idx_verified ON entries(verified);
 """
 
 
@@ -172,10 +184,10 @@ def build(db: Path, version: str, entries) -> None:
         entries,
     )
     con.executemany(
-        "INSERT INTO entries_fts (rowid, name, phrases, purpose, section, restriction, aliases)"
-        " VALUES ((SELECT id FROM entries WHERE name = ?), ?, ?, ?, ?, ?, ?)",
-        [(e["name"], e["name"], e["phrases"], e["purpose"], e["section"], e["restriction"], e["aliases"])
-         for e in entries],
+        "INSERT INTO entries_fts (rowid, name, phrases, purpose, section, form, restriction, source, aliases)"
+        " VALUES ((SELECT id FROM entries WHERE name = ?), ?, ?, ?, ?, ?, ?, ?, ?)",
+        [(e["name"], e["name"], e["phrases"], e["purpose"], e["section"], e["form"],
+          e["restriction"], e["source"], e["aliases"]) for e in entries],
     )
     con.execute("INSERT INTO entries_fts(entries_fts) VALUES('optimize')")
     pairs = [(e["name"], t) for e in entries for t in e["related"]]
@@ -202,15 +214,16 @@ def search(db: Path, query: str, limit: int = 20) -> None:
     except sqlite3.OperationalError:
         hits = []
     n_like = 0
-    # 召回不足 → 退化子串扫。这是刻意的：短语索引只能命中"写过的那几个词"，
-    # 用户换个说法就漏。兜底扫全表，几千条内是毫秒级，数量级再大就该上 trigram 了。
+    # 召回不足 → 退化子串扫，扫描列与 FTS 列一致（八列）。这是刻意的：短语索引只能
+    # 命中"写过的那几个词"，用户换个说法就漏。兜底扫全表，几万条内是毫秒级；
+    # 再大之后换 trigram 小表，见 详细/体检与规模.md §19「千万档」。
     if n_fts < 2:
         like = f"%{query}%"
         more = con.execute(
             "SELECT *, -1.0 AS rank FROM entries"
             " WHERE purpose LIKE ? OR name LIKE ? OR phrases LIKE ? OR section LIKE ?"
-            " OR aliases LIKE ? LIMIT ?",
-            (like, like, like, like, like, limit),
+            " OR form LIKE ? OR restriction LIKE ? OR source LIKE ? OR aliases LIKE ? LIMIT ?",
+            (like, like, like, like, like, like, like, like, limit),
         ).fetchall()
         seen = {h["name"] for h in hits}
         add = [m for m in more if m["name"] not in seen]
@@ -226,6 +239,49 @@ def search(db: Path, query: str, limit: int = 20) -> None:
         star = "★" if h["phrases"] and any(t in h["phrases"] for t in terms) else " "
         print(f"{star} {h['name']}  L{h['line']}  [{h['section']}]")
         print(f"    {h['purpose']}")
+        if h["body"]:
+            print(f"    →正文 {h['body']}")
+
+
+def form_query(db: Path, form_value: str, limit: int = 50) -> None:
+    """按形态过滤：--form 插件。主/次形态都算（`工具（插件）` 搜「插件」命中）。
+
+    走 FTS 列过滤（form:"X"），是索引查找不是全表扫——千万条量级仍快（详细/体检与规模.md §19）。
+    「dsh 插件」这类聚合查询的正式入口。
+    """
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    match = 'form:"' + form_value.replace('"', '""') + '"'
+    try:
+        total = con.execute(
+            "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH ?", (match,)
+        ).fetchone()[0]
+        hits = con.execute(
+            "SELECT e.*, bm25(entries_fts) AS rank FROM entries_fts f"
+            " JOIN entries e ON e.id = f.rowid"
+            " WHERE entries_fts MATCH ? ORDER BY rank LIMIT ?",
+            (match, limit),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        total, hits = 0, []
+    if not hits:
+        # 形态是封闭枚举（§3），正常都该走 FTS；LIKE 兜底防写法出入（半角括号等）
+        like = f"%{form_value}%"
+        hits = con.execute(
+            "SELECT *, -1.0 AS rank FROM entries WHERE form LIKE ? ORDER BY name LIMIT ?",
+            (like, limit),
+        ).fetchall()
+        total = len(hits)
+    con.close()
+
+    more = f"（列前 {limit}）" if total > len(hits) else ""
+    print(f"形态过滤：{form_value} → {total} 条{more}")
+    if not hits:
+        print("没找到。形态是封闭枚举（§3）：工具｜网站｜插件｜Skill｜项目｜模型｜课程｜书｜文章｜概念｜硬件｜服务")
+        return
+    for h in hits:
+        print(f"  {h['name']}  L{h['line']}  [{h['section']}]")
+        print(f"    形态：{h['form']} ｜ {h['purpose']}")
         if h["body"]:
             print(f"    →正文 {h['body']}")
 
@@ -260,6 +316,13 @@ def stats(db: Path, src: Path, entries) -> None:
     for k, v in sorted(secs.items(), key=lambda x: -x[1]):
         flag = "  ⚠ 超过 300" if v > 300 else ""
         print(f"  {v:>5}  {k}{flag}")
+    prim = {}
+    for e in entries:
+        p = e["form"].split("（")[0].strip() or "（缺形态）"
+        prim[p] = prim.get(p, 0) + 1
+    print("形态分布（按主形态）：")
+    for k, v in sorted(prim.items(), key=lambda x: -x[1]):
+        print(f"  {v:>5}  {k}")
     acts = sorted((e["active"], e["name"]) for e in entries if e["active"])
     if acts:
         print(f"最久未活跃：{acts[0][0]}  {acts[0][1]}")
@@ -282,6 +345,13 @@ def main() -> int:
         if not db.exists():
             build(db, version, entries)
         search(db, q)
+        return 0
+
+    if "--form" in sys.argv:
+        q = sys.argv[sys.argv.index("--form") + 1]
+        if not db.exists():
+            build(db, version, entries)
+        form_query(db, q)
         return 0
 
     if "--related" in sys.argv:
