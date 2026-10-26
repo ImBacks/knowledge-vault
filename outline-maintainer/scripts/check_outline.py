@@ -19,7 +19,7 @@
 5. 每条必须有 `活 YYYY-MM-DD`，格式合法、不是未来日期；
    可选的 `核 YYYY-MM-DD`（最近联网核验，§3）写了才查：格式合法、不是未来日期；
 6. 知识条目 `正文：` 指向的文件必须存在，且首行是与条目名一致的一级标题；
-7. `- 相关：` 指向的条目必须存在。
+7. `- 相关：[[名字]]`（或裸名字）指向的条目必须存在。
 
 警告检查项（对应 §18 体检）:
 A. 仍有条目使用已废弃的 `范围：` 字段（应改 `限制：` 或删掉）；
@@ -52,6 +52,12 @@ HEADER_RE = re.compile(r"<!--\s*v(\d+)\s*｜\s*条目\s*(\d+)\s*｜\s*更新\s*(
 TOC_RE = re.compile(r"^-\s*(.+?)（(\d+)）\s*$")
 ENTRY_RE = re.compile(r"^-\s+\*\*(.+?)\*\*(?:\s*｜\s*(.*))?$")
 RELATED_RE = re.compile(r"^-\s*相关\s*[:：]\s*(.+)$")
+
+
+def _unwrap_wikilink(s: str) -> str:
+    # `- 相关：[[名字]]`（Obsidian 双链，v33 起推荐写法）与裸 `名字` 均接受
+    s = s.strip()
+    return s[2:-2].strip() if s.startswith("[[") and s.endswith("]]") else s
 NOTE_RE = re.compile(r"^-\s*备注\s*[:：]\s*(.*)$")
 LOG_RE = re.compile(r"^-\s*(\d{4}-\d{2}-\d{2})\b")
 # §17 检索行：`- 2026-10-25 ｜ 检索 「查询词」 命中 3`（唯一不落盘也记的日志行）
@@ -236,7 +242,7 @@ def main() -> int:
             continue
         r = RELATED_RE.match(s)
         if r:
-            related.append((r.group(1).strip(), i))
+            related.append((_unwrap_wikilink(r.group(1)), i))
             continue
         # 备注写在条目行的子行（`  - 备注：…`），挂到最近一条条目上，
         # 否则待核验检查扫不到备注里的标记

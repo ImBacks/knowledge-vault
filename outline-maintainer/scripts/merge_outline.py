@@ -35,6 +35,12 @@ from pathlib import Path
 HEADER_RE = re.compile(r"<!--\s*v(\d+)\s*｜\s*条目\s*(\d+)\s*｜\s*更新\s*([0-9\-]+)\s*-->")
 ENTRY_RE = re.compile(r"^-\s+\*\*(.+?)\*\*(?:\s*｜\s*(.*))?$")
 RELATED_RE = re.compile(r"^-\s*相关\s*[:：]\s*(.+)$")
+
+
+def _unwrap_wikilink(s: str) -> str:
+    # `- 相关：[[名字]]`（Obsidian 双链，v33 起推荐写法）与裸 `名字` 均接受
+    s = s.strip()
+    return s[2:-2].strip() if s.startswith("[[") and s.endswith("]]") else s
 NOTE_RE = re.compile(r"^-\s*备注\s*[:：]\s*(.*)$")
 USAGE_RE = re.compile(r"^-\s*用法\s*[:：]\s*(.*)$")
 SHARD_TOC_RE = re.compile(r"^-\s*.+→.+\s*（\d+）\s*$")   # 分片清单行：- 工具库 → 工具库.md（412）
@@ -177,7 +183,7 @@ def parse_outline(path: Path, label: str = "对方") -> dict:
             continue
         r = RELATED_RE.match(s)
         if r and cur is not None:
-            cur["related"].append(r.group(1).strip())
+            cur["related"].append(_unwrap_wikilink(r.group(1)))
 
     if version is None:
         warnings.append("未找到文件头版本行（可能不是标准 大纲.md）")

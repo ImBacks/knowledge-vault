@@ -154,7 +154,7 @@ LIB_B = """<!-- v3 ｜ 条目 99 ｜ 更新 2026-10-25 -->
 
 ### 效率
 - **ToolNew** ｜ 作用：剪贴板历史 / 快速粘贴 — 开源跨平台 ｜ 形态：工具 ｜ 来源：github.com/new/tools ｜ 活 2026-10-25
-  - 相关：Ghost条目
+  - 相关：[[Ghost条目]]
 - **DupEntry** ｜ 作用：重复检测 A ｜ 形态：工具 ｜ 来源：github.com/dup/one ｜ 活 2026-10-25
 - **DupEntry** ｜ 作用：重复检测 B ｜ 形态：工具 ｜ 来源：github.com/dup/two ｜ 活 2026-10-25
 
@@ -293,6 +293,7 @@ def test_check_outline(root: Path):
 ### B › b
 - **知识A** ｜ 作用：知识 — k ｜ 形态：文章 ｜ 来源：本地:a.pdf ｜ 正文：知识/b/知识A.md ｜ 活 2026-10-20
 - **知识B** ｜ 作用：知识 — k ｜ 形态：文章 ｜ 来源：本地:b.pdf ｜ 正文：知识/b/知识B.md ｜ 活 2026-10-20
+  - 相关：[[幽灵条目]]
 """, encoding="utf-8")  # 正文文件故意不建
     r2 = run("check_outline.py", bad / "大纲.md")
     out = r2.stdout
@@ -318,7 +319,7 @@ IDX_LIB = """<!-- v1 ｜ 条目 4 ｜ 更新 2026-10-25 -->
 ### 视频 › 下载
 - **SaveTube** ｜ 作用：视频下载 / 去水印 — 支持 B站 ｜ 形态：工具 ｜ 来源：github.com/x/y ｜ 活 2026-10-23 ｜ 别名：下载器
 - **SubTool** ｜ 作用：批量修改视频字幕 — 保守写法 ｜ 形态：工具 ｜ 来源：github.com/x/s ｜ 活 2026-10-23
-  - 相关：SaveTube
+  - 相关：[[SaveTube]]
 
 ### 效率 › 剪贴板
 - **ClipHist** ｜ 作用：剪贴板历史 — 开源 ｜ 形态：工具 ｜ 来源：github.com/a/b ｜ 活 2026-10-23

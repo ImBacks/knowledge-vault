@@ -9,6 +9,10 @@ faster-whisper>=1.0
 av>=14.1,<16   # av≥16 移除 metadata_errors，faster-whisper 1.2.x 调它会崩，必须锁
 # 用途C：B站等在线视频（拉字幕 / 下载音频）
 yt-dlp>=2024.10.0
+# 用途D：长内容蒸馏（distill/ 子模块 = cangjie-skill v2.5.0 功能子集）——把书籍/课程/长会话转写蒸馏成方法论与可执行技能包
+pyyaml>=6.0
+#   可选增强（不装不影响流程）：tiktoken（token 计数）、jsonschema（能力卡 schema 校验）
+#   缺 PyYAML 时蒸馏降级为 agent 手工路线（依赖缺席先提议模式，同会话只问一次）
 # 用途B+（可选）：GPU 加速转写——仅 N 卡有意义，长视频常客才值得装；不装默认 CPU，功能完整
 #   python -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 #   运行时 parse_video 加 --device cuda；环境自检 common.py --doctor，

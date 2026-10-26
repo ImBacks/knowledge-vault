@@ -435,6 +435,14 @@ INTENTS = [
 ]
 
 
+def _importable(mod: str) -> bool:
+    try:
+        __import__(mod)
+        return True
+    except Exception:
+        return False
+
+
 def doctor():
     utf8_console()
     root = root_by_marker()
@@ -498,6 +506,20 @@ def doctor():
         if miss_tools:
             parts.append("winget install Gyan.FFmpeg")
         print(f"  ❌ {intent}：缺 {' '.join(miss_pkgs + miss_tools)} → {'；'.join(parts)}")
+
+    # 蒸馏（distill/ = cangjie-skill 功能子集）：独立于上方 DEPS——缺 PyYAML 不影响解析各组的退出码，
+    # 只报一行指路；蒸馏降级路线（agent 手工）见 解析手册「蒸馏」节
+    distill_entry = Path(__file__).resolve().parent.parent / "distill" / "scripts" / "cangjie.py"
+    if not distill_entry.exists():
+        print("ℹ 蒸馏子模块（distill/）不在——蒸馏走 agent 手工路线（解析手册「蒸馏」节）")
+    else:
+        try:
+            import yaml  # noqa: F401
+            opt_miss = [m for m in ("tiktoken", "jsonschema") if not _importable(m)]
+            extra = f"；可选未装：{'、'.join(opt_miss)}（token 计数 / schema 校验用，不装不影响）" if opt_miss else ""
+            print(f"✅ 蒸馏（cangjie）  长内容→方法论/技能包  入口 {distill_entry}{extra}")
+        except Exception:
+            print(f"❌ 蒸馏（cangjie）  缺 PyYAML —— pip install pyyaml（不装则蒸馏降级为 agent 手工路线）")
 
     try:
         import ctranslate2

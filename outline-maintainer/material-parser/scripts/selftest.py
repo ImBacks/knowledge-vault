@@ -603,6 +603,33 @@ def test_device_resolve():
                "--doctor" in str(e), str(e)[:120])
 
 
+def test_distill():
+    print("\n[11] 蒸馏子模块（distill/ = cangjie-skill 功能子集）：文件完整 + 上游工具 doctor 跑通")
+    d = Path(__file__).resolve().parent.parent / "distill"
+    need = [
+        d / "scripts" / "cangjie.py",
+        d / "scripts" / "cangjie_common.py",
+        d / "extractors",
+        d / "templates",
+        d / "methodology",
+        d / "schemas" / "capability-bundle.schema.json",
+        d / "PROVENANCE.md",
+        d / "蒸馏规范.md",
+        d / "LICENSE",
+    ]
+    missing = [str(p.relative_to(d)) for p in need if not p.exists()]
+    report("distill 功能件齐全", not missing, f"缺：{missing}" if missing else "")
+    spec = d / "蒸馏规范.md"
+    head = spec.read_text(encoding="utf-8")[:200] if spec.exists() else ""
+    report("蒸馏规范.md 无 frontmatter（v22 先例：不注册为第二技能）",
+           spec.exists() and not head.lstrip().startswith("---"), head[:80])
+    r = subprocess.run([sys.executable, str(d / "scripts" / "cangjie.py"), "doctor"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       cwd=str(d), timeout=60)
+    report("cangjie.py doctor 子进程 PASS", r.returncode == 0,
+           (r.stdout + r.stderr)[-200:] if r.returncode != 0 else "")
+
+
 # ----------------------------------------------------------------
 
 def main():
@@ -628,6 +655,7 @@ def main():
     test_clean()
     test_sha1_index()
     test_device_resolve()
+    test_distill()
 
     ok = [x for x in RESULTS if x[1]]
     bad = [x for x in RESULTS if not x[1]]

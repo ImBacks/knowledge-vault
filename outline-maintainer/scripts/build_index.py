@@ -46,6 +46,12 @@ from pathlib import Path
 HEADER_RE = re.compile(r"<!--\s*v(\d+)\s*｜\s*条目\s*(\d+)\s*｜\s*更新\s*([0-9\-]+)\s*-->")
 ENTRY_RE = re.compile(r"^-\s+\*\*(.+?)\*\*(?:\s*｜\s*(.*))?$")
 RELATED_RE = re.compile(r"^-\s*相关\s*[:：]\s*(.+)$")
+
+
+def _unwrap_wikilink(s: str) -> str:
+    # `- 相关：[[名字]]`（Obsidian 双链，v33 起推荐写法）与裸 `名字` 均接受
+    s = s.strip()
+    return s[2:-2].strip() if s.startswith("[[") and s.endswith("]]") else s
 FIELD_SEP = " ｜ "
 LIBRARIES = ("工具库", "知识库")
 
@@ -76,7 +82,7 @@ CREATE VIRTUAL TABLE entries_fts USING fts5(
     tokenize = 'unicode61 remove_diacritics 1'
 );
 
--- 双向相关对表：`- 相关：B` 写在 A 名下 → (A, B)。反向查询就是 WHERE tgt = ?。
+-- 双向相关对表：`- 相关：[[B]]`（或裸 B）写在 A 名下 → (A, B)。反向查询就是 WHERE tgt = ?。
 -- 主数据里每个方向只写一遍，这里两个方向都能查，代价是派生层一张小表。
 -- （列名不能用 to，SQLite 保留字）
 CREATE TABLE related (
@@ -186,7 +192,7 @@ def parse(path: Path):
             continue
         r = RELATED_RE.match(s)
         if r and cur is not None:
-            cur["related"].append(r.group(1).strip())
+            cur["related"].append(_unwrap_wikilink(r.group(1)))
     return version, entries
 
 
