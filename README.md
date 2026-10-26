@@ -50,3 +50,7 @@ outline-maintainer/
 ```
 
 库的数据文件（`大纲.md`、`日志.md`、`知识/` 等）由使用者自建于自己的库根，**不在本仓库内**。
+
+## 许可证
+
+[MIT](LICENSE) · 欢迎通过 issue / PR 参与（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
