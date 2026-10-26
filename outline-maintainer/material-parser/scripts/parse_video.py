@@ -5,12 +5,13 @@
     D:\\python\\python.exe scripts/parse_video.py <视频/音频路径 或 URL>
         [--model small] [--language zh] [--chunk-sec 600] [--keyframes]
         [--no-transcribe] [--max-frames 120] [--cue-words 词1,词2] [--keep-audio]
-        [--cookies chrome|edge|firefox|brave] [--force] [--cache-root 目录]
+        [--device cpu|cuda] [--cookies chrome|edge|firefox|brave] [--force] [--cache-root 目录]
 
 在线视频三级链路（yt-dlp 支持的站点均可：B站/抖音/TikTok/YouTube 等）：
     1. CC 字幕：yt-dlp 只拉字幕不下载，秒级，免登录；
     2. AI 字幕：--cookies 走浏览器登录态拉取（需本机浏览器已登录该站）；
-    3. 兜底：下载音频 → faster-whisper 本地转写（CPU int8，约视频时长的 0.3~0.6 倍，后台跑）。
+    3. 兜底：下载音频 → faster-whisper 本地转写（默认 CPU int8，约视频时长的 0.3~0.6 倍；
+       本机有 N 卡可加 --device cuda 提速（实测参考见解析手册），环境自检 common.py --doctor，后台跑）。
     抖音类站点普遍无 CC/AI 字幕，基本确定落兜底转写；部分内容需 --cookies。
 
 关键帧双信号（--keyframes，调用方按视频类型自行取舍，工具不替人分类）：
@@ -25,7 +26,8 @@
 
 断点续跑：转写段落逐条追加 segments.jsonl，中断后重跑同一命令自动续。
 中间 wav / 下载的媒体在转写成功后默认删除（GB 级），中断时保留供续跑；--keep-audio 可保留。
-缓存命中：status=done 且（转写路线下）model/language 一致 → 秒回；改 --chunk-sec 只重新分块
+缓存命中：status=done 且（转写路线下）model/language 一致 → 秒回（--device 不参与判定：换设备沿用
+已有转写缓存，要按新设备重转用 --force）；改 --chunk-sec 只重新分块
 （不重拉字幕、不重转写）；keyframes 是叠加产物，缺了单独补；--max-frames 变化会重抽帧。
 此前纯画面（visual）路线的缓存，重跑去掉 --no-transcribe 会自动补转写。
 URL 缓存键 = 站点+视频ID（短链/参数变体同一视频共用缓存；分 P 单独成键）。
@@ -235,8 +237,21 @@ def write_segments_jsonl(segments, seg_path: Path):
         encoding="utf-8")
 
 
+def resolve_device(requested, cuda_count):
+    """--device → (device, compute_type)。cuda 点名而本机没有 N 卡 → 报错不静默回落；
+    --device 不进缓存键（transcribe_params 只记 model/language），换设备沿用已转写缓存。"""
+    if requested == "cuda":
+        if not cuda_count:
+            raise RuntimeError("本机未检测到 NVIDIA GPU，无法 --device cuda："
+                               "去掉该参数按 CPU 跑（默认路径，功能完整），"
+                               "或跑 common.py --doctor 查看环境")
+        return "cuda", "int8_float16"
+    return "cpu", "int8"
+
+
 def transcribe(wav: Path, cache_dir: Path, args) -> int:
     """faster-whisper 转写，段落流式追加 segments.jsonl（断点依据）。返回总段数。"""
+    import ctranslate2
     from faster_whisper import WhisperModel
     seg_path = cache_dir / "segments.jsonl"
     resume_from = 0.0
@@ -245,8 +260,21 @@ def transcribe(wav: Path, cache_dir: Path, args) -> int:
         resume_from = existing[-1]["end"]
         print(f"  断点续跑：已有 {len(existing)} 段，从 {C.fmt_ts(resume_from)} 继续")
 
-    print(f"  加载 whisper {args.model}（int8 / CPU，首次运行会先下载模型走 hf-mirror）…")
-    model = WhisperModel(args.model, device="cpu", compute_type="int8")
+    cuda_count = ctranslate2.get_cuda_device_count()
+    device, compute_type = resolve_device(getattr(args, "device", "cpu"), cuda_count)
+    if device == "cuda":
+        C.enable_cuda_dlls()  # 注册 pip 装的 cuBLAS/cuDNN DLL 目录（手动配 PATH 的装法不受影响）
+    print(f"  加载 whisper {args.model}（{compute_type} / {device.upper()}，"
+          f"首次运行会先下载模型走 hf-mirror）…")
+    try:
+        model = WhisperModel(args.model, device=device, compute_type=compute_type)
+    except Exception as e:
+        if device == "cuda":
+            raise RuntimeError(
+                f"CUDA 初始化失败（{type(e).__name__}）：{str(e)[:200]}。"
+                f"跑 common.py --doctor 查缺什么（通常缺 nvidia-cublas-cu12 / nvidia-cudnn-cu12"
+                f" 或 NVIDIA 驱动过旧）；去掉 --device 按 CPU 跑。") from e
+        raise
     kw = {"vad_filter": True, "vad_parameters": {"min_silence_duration_ms": 500}}
     if args.language:
         kw["language"] = args.language
@@ -280,8 +308,13 @@ def transcribe(wav: Path, cache_dir: Path, args) -> int:
     total = len(read_segments(seg_path))
     dur = getattr(info, "duration", None)
     proc = (dur - resume_from) if dur else None  # 续跑时只算本次实际处理的时长
-    speed = f"，{(time.time() - t0) / proc:.2f}x 实时" if proc and proc > 0 else ""
-    print(f"  转写完成：共 {total} 段（本次新增 {n_new}），耗时 {time.time() - t0:.0f} 秒{speed}")
+    elapsed = time.time() - t0
+    speed = f"，{elapsed / proc:.2f}x 实时" if proc and proc > 0 else ""
+    print(f"  转写完成：共 {total} 段（本次新增 {n_new}），耗时 {elapsed:.0f} 秒{speed}")
+    if elapsed >= 600 and device == "cpu" and cuda_count:
+        print("  ℹ 本次 CPU 转写用时较长；本机有 NVIDIA GPU，装好 CUDA 运行库后加 --device cuda "
+              "可提速（收益随模型/显卡而变；环境自检 common.py --doctor，"
+              "菜单与实测数字见项目 README「工具清单：默认与可选」）")
     return total
 
 
@@ -565,6 +598,9 @@ def main():
     ap = argparse.ArgumentParser(description="音视频/在线视频解析（字幕优先 → 转写兜底 → 分块缓存）")
     ap.add_argument("input", help="本地视频/音频路径，或在线视频 URL（B站等）")
     ap.add_argument("--model", default="small", help="whisper 模型：tiny/base/small/medium/large-v3（默认 small）")
+    ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
+                    help="转写设备（默认 cpu，全功能；cuda 需 N 卡 + CUDA 运行库，"
+                         "环境自检 common.py --doctor，菜单见 README「工具清单：默认与可选」）")
     ap.add_argument("--language", default=None, help="语言代码（如 zh），默认自动检测")
     ap.add_argument("--chunk-sec", type=int, default=C.DEFAULT_CHUNK_SEC, help="每块秒数（默认 600）")
     ap.add_argument("--keyframes", action="store_true", help="抽取关键帧（场景检测 + 讲述锚点）并生成缩略图对照表")
@@ -751,7 +787,8 @@ def main():
                         route = "ai"
                         print(f"  ✅ AI 字幕：{len(segs)} 段")
                 if segs is None:
-                    print("[3/3] 字幕不可用 → 下载音频本地转写（CPU 慢，建议后台跑）…")
+                    print(f"[3/3] 字幕不可用 → 下载音频本地转写（{args.device.upper()}，"
+                          f"{'慢，' if args.device == 'cpu' else ''}建议后台跑）…")
                     media = download_media(url, cache_dir, want_video=False)
                     manifest["media_file"] = media.name
                     C.save_manifest(cache_dir, manifest)

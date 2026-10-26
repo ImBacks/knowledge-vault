@@ -17,7 +17,7 @@
   不进索引：核（可信度标记，不是检索词）｜ 备注（自由文本，检索数据一律走 `别名` 字段）｜
       正文内容（命中后照常读文件）
 
-三条设计约束（别破坏，破坏了这套就没意义）：
+四条设计约束（别破坏，破坏了这套就没意义）：
 1. **大纲.md 是唯一真相。** 本脚本只读它，产物是 `索引/大纲.db`，随时可删、可全量重建。
    丢了 db 不损失任何信息。
 2. **不装中文分词器。** `作用` 字段按格式写成「短语 / 短语 — 说明」，脚本把 `—` 之前
@@ -26,6 +26,9 @@
 3. **查不到就兜底。** 短语精确匹配会漏掉「用户换个说法」的情况，此时退回 LIKE 子串扫描，
    扫描列与 FTS 列保持一致（八列）。这是刻意的：召回靠别名池补，不靠分词器猜。LIKE
    全表扫在几万条内是毫秒级；再大之后换什么、何时换，定论在 详细/体检与规模.md §19「千万档」。
+4. **检索入口先保新鲜。** --search/--form/--related 用前比对 大纲.md 与 db 的 mtime，
+   落后即重建——查陈旧索引的假阴性就是「漏检」，是这个库最贵的失败（万条重建 0.2~0.5 秒，
+   无条件值得）。条目重名直接拒建并指路 check_outline（名字是主键）。
 
 为什么主索引不用 Meilisearch / trigram：
 - Meilisearch 要多跑一个服务进程，挂了整个库不能查；单机个人库不值得。
@@ -37,6 +40,7 @@
 import re
 import sqlite3
 import sys
+import unicodedata
 from pathlib import Path
 
 HEADER_RE = re.compile(r"<!--\s*v(\d+)\s*｜\s*条目\s*(\d+)\s*｜\s*更新\s*([0-9\-]+)\s*-->")
@@ -94,6 +98,21 @@ def read_text(path: Path) -> str:
         except UnicodeDecodeError:
             continue
     raise ValueError(f"无法按 UTF-8 读取 {path}")
+
+
+def utf8_console():
+    """Windows 控制台默认 GBK，统一成 UTF-8 防止中文/符号打印报错。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def norm_name(name: str) -> str:
+    """主键归一化（同 check_outline：NFKC + 去空白 + 小写）。"""
+    s = unicodedata.normalize("NFKC", name)
+    return re.sub(r"\s+", "", s).lower()
 
 
 def split_phrases(purpose: str) -> str:
@@ -172,6 +191,19 @@ def parse(path: Path):
 
 
 def build(db: Path, version: str, entries) -> None:
+    # 名字是主键：重名（含归一化后相同）直接拒建，不抛裸 IntegrityError
+    seen = {}
+    dup = False
+    for e in entries:
+        k = norm_name(e["name"])
+        if k in seen:
+            print(f"❌ 条目名字重复：「{e['name']}」（L{seen[k]} 与 L{e['line']}）")
+            dup = True
+        else:
+            seen[k] = e["line"]
+    if dup:
+        print("   先跑 check_outline.py 清硬错误，再建索引。")
+        sys.exit(2)
     db.parent.mkdir(parents=True, exist_ok=True)
     if db.exists():
         db.unlink()
@@ -329,7 +361,29 @@ def stats(db: Path, src: Path, entries) -> None:
         print(f"最近活跃：{acts[-1][0]}  {acts[-1][1]}")
 
 
+def ensure_fresh(db: Path, src: Path, version: str, entries) -> None:
+    """检索入口用：db 缺失、或落后于 大纲.md（mtime）即先重建。
+
+    陈旧索引对新写入的条目返回假阴性——那就是「漏检」，这个库最贵的失败。
+    万条全量重建 0.2~0.5 秒（详细/体检与规模.md §19），无条件值得。"""
+    if db.exists() and db.stat().st_mtime_ns >= src.stat().st_mtime_ns:
+        return
+    if db.exists():
+        print("ℹ 索引落后于 大纲.md，先重建再查（不查陈旧索引）")
+    build(db, version, entries)
+
+
+def opt_value(args, flag):
+    """取 flag 的值；缺值报一行用法错误退出，不抛裸 IndexError。"""
+    i = args.index(flag)
+    if i + 1 >= len(args):
+        print(f"错误：{flag} 需要一个值（如 {flag} \"查询词\"）")
+        sys.exit(2)
+    return args[i + 1]
+
+
 def main() -> int:
+    utf8_console()
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
@@ -339,30 +393,25 @@ def main() -> int:
         return 2
     db = src.parent / "索引" / "大纲.db"
     version, entries = parse(src)
+    args = sys.argv[1:]
 
-    if "--search" in sys.argv:
-        q = sys.argv[sys.argv.index("--search") + 1]
-        if not db.exists():
-            build(db, version, entries)
-        search(db, q)
+    if "--search" in args:
+        ensure_fresh(db, src, version, entries)
+        search(db, opt_value(args, "--search"))
         return 0
 
-    if "--form" in sys.argv:
-        q = sys.argv[sys.argv.index("--form") + 1]
-        if not db.exists():
-            build(db, version, entries)
-        form_query(db, q)
+    if "--form" in args:
+        ensure_fresh(db, src, version, entries)
+        form_query(db, opt_value(args, "--form"))
         return 0
 
-    if "--related" in sys.argv:
-        q = sys.argv[sys.argv.index("--related") + 1]
-        if not db.exists():
-            build(db, version, entries)
-        related(db, q)
+    if "--related" in args:
+        ensure_fresh(db, src, version, entries)
+        related(db, opt_value(args, "--related"))
         return 0
 
     build(db, version, entries)
-    if "--stats" in sys.argv:
+    if "--stats" in args:
         stats(db, src, entries)
     else:
         print(f"已重建 {db}：{version}，{len(entries)} 条，{db.stat().st_size/1024:.1f} KB")

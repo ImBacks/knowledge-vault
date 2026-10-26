@@ -5,8 +5,8 @@
 用法:
     python merge_outline.py <本库大纲.md> <对方大纲.md 或对方库根> [--json 输出.json] [--limit 40]
 
-**只读。不写本库、不写对方、不复制正文文件**——落盘一律由 agent 走 SKILL §7 写入协议
-（含第 10 条写锁）完成，本脚本只产出「分诊报告 + 导入计划」（--json 供 agent 机读）。
+**只读。不写本库、不写对方、不复制正文文件**——落盘一律由 agent 走 §7 写入协议
+（详细/写入协议.md，含第 10 条写锁）完成，本脚本只产出「分诊报告 + 导入计划」（--json 供 agent 机读）。
 
 四类分诊（§20）：
   A 直接并入    归一化名字、来源 URL 都无冲突 → 按本库分类树归位
@@ -114,8 +114,11 @@ def parse_fields(rest: str) -> dict:
     return out
 
 
-def parse_outline(path: Path) -> dict:
-    """解析一份 大纲.md：条目（含备注/用法/相关子行）、分类段、头部、目录形态。"""
+def parse_outline(path: Path, label: str = "对方") -> dict:
+    """解析一份 大纲.md：条目（含备注/用法/相关子行）、分类段、头部、目录形态。
+
+    label：这份文件是「本库」还是「对方」——分片检测的报错指引两边不同（本库分片
+    该逐片导入，对方分片该要完整导出），不能一律说「对方库已分片」误导 agent。"""
     entries, warnings = [], []
     lib = cat = None
     cur = None
@@ -187,8 +190,12 @@ def parse_outline(path: Path) -> dict:
         else:
             seen[e["norm"]] = e["line"]
     if shard_toc:
-        print("❌ 对方库已分片（目录是分片清单，条目在分片文件里），本工具暂不支持。")
-        print("   请让对方提供未分片的完整导出，或逐片指定分片文件作为 <对方大纲.md>。")
+        if label == "本库":
+            print(f"❌ 本库已分片（{path} 的目录是分片清单，条目在分片文件里），本工具暂不支持。")
+            print("   请以目标分片文件（如 工具库.md）代替 大纲.md 作为第一个参数，逐片导入。")
+        else:
+            print(f"❌ 对方库已分片（{path}，目录是分片清单，条目在分片文件里），本工具暂不支持。")
+            print("   请让对方提供未分片的完整导出，或逐片指定分片文件作为 <对方大纲.md>。")
         sys.exit(2)
     return {"version": version, "entries": entries, "sections": sections, "warnings": warnings}
 
@@ -264,8 +271,8 @@ def main() -> int:
         except (IndexError, ValueError):
             pass
 
-    tgt = parse_outline(tgt_md)
-    src = parse_outline(src_md)
+    tgt = parse_outline(tgt_md, "本库")
+    src = parse_outline(src_md, "对方")
     warnings = list(tgt["warnings"]) + [f"对方：{w}" for w in src["warnings"]]
     tgt_base, src_base = tgt_md.parent, src_md.parent
 
@@ -418,7 +425,11 @@ def main() -> int:
     print("本脚本只读，未改动任何文件；知识正文文件的复制/并入在落盘时执行。")
 
     if "--json" in args:
-        out = Path(args[args.index("--json") + 1])
+        i = args.index("--json")
+        if i + 1 >= len(args):
+            print("错误：--json 需要一个输出路径（如 --json plan.json）")
+            return 2
+        out = Path(args[i + 1])
         payload = {
             "target": {"path": str(tgt_md), "version": tgt["version"], "entries": len(tgt["entries"])},
             "source": {"path": str(src_md), "version": src["version"], "entries": len(src["entries"])},

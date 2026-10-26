@@ -9,4 +9,8 @@ faster-whisper>=1.0
 av>=14.1,<16   # av≥16 移除 metadata_errors，faster-whisper 1.2.x 调它会崩，必须锁
 # 用途C：B站等在线视频（拉字幕 / 下载音频）
 yt-dlp>=2024.10.0
+# 用途B+（可选）：GPU 加速转写——仅 N 卡有意义，长视频常客才值得装；不装默认 CPU，功能完整
+#   python -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+#   运行时 parse_video 加 --device cuda；环境自检 common.py --doctor，
+#   实测数字与代价见项目根 README「工具清单：默认与可选」；要求 ctranslate2 ≥4.5（faster-whisper 自带依赖）
 # 注：rapidocr-onnxruntime（v1 旧包）在 Python 3.13 无发行版，统一用新包 rapidocr

@@ -27,10 +27,15 @@ B. 单条子类（只有 1 条的分类 = 分类过碎；条目 < 30 时不报�
 C. `（待核验）` / `（待补充）` 条目数与占比（库的腐坏速度指标）；
 D. 缺来源条目；
 E. 作用字段超过 60 字（索引行退化成摘要，检索信噪比下降）；
-F. 文件头日期落后于操作日志最后一条日期；
+F. 文件头日期落后于操作日志最后一条**落盘行**日期（§17 检索行不落盘、不升版本，
+   不计入比对——否则每个检索日都会误报）；
 G. 索引条目数逼近单文件阈值（> 700 条时提示分片）；
 H. 抽查候选（§18：库 ≥20 条、距上次抽查 ≥30 天、存在超 90 天未核或无 `核` 的条目）。
    这是事实新鲜度信号，不是淘汰建议——抽查更新事实，从不删条目。
+I. 无法识别的字段段（条目行里不匹配任何已知字段的段——疑似字段名手误或未登记的新字段）。
+
+另输出「近 30 天检索 N 次、落空 M 次」（§19 度量；数据源 = §17 检索行
+`- 日期 ｜ 检索 「词」 命中 N`，v27 起记录，没有就静默跳过）。
 
 **不检查「久未使用」，也不提议淘汰**——淘汰由用户自己提（§6、§18）。
 
@@ -49,6 +54,8 @@ ENTRY_RE = re.compile(r"^-\s+\*\*(.+?)\*\*(?:\s*｜\s*(.*))?$")
 RELATED_RE = re.compile(r"^-\s*相关\s*[:：]\s*(.+)$")
 NOTE_RE = re.compile(r"^-\s*备注\s*[:：]\s*(.*)$")
 LOG_RE = re.compile(r"^-\s*(\d{4}-\d{2}-\d{2})\b")
+# §17 检索行：`- 2026-10-25 ｜ 检索 「查询词」 命中 3`（唯一不落盘也记的日志行）
+SEARCH_LOG_RE = re.compile(r"^-\s*(\d{4}-\d{2}-\d{2})\s*｜\s*检索\s*「(.*?)」\s*命中\s*(\d+)")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 FIELD_SEP = " ｜ "
 BODY_HEAD_RE = re.compile(r"^<!--\s*正文：")
@@ -110,7 +117,17 @@ def parse_fields(rest: str):
     return out
 
 
+def utf8_console():
+    """Windows 控制台默认 GBK，统一成 UTF-8 防止中文/符号打印报错。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main() -> int:
+    utf8_console()
     if len(sys.argv) < 2:
         print("用法: python check_outline.py <大纲.md 路径>")
         return 2
@@ -167,8 +184,9 @@ def main() -> int:
     heading_order = []
     entries = []  # dict(name, fields, line, lib, cat)
     related = []  # (target, line)
-    log_dates = []
+    log_dates = []        # 落盘行日期（警告 F 只比这些——检索行不落盘，不计入）
     spotcheck_dates = []
+    search_log = []       # 检索行 (日期, 命中数)
     in_log = False
 
     for i, ln in enumerate(lines, 1):
@@ -193,6 +211,10 @@ def main() -> int:
             in_log = False
             continue
         if in_log:
+            sm = SEARCH_LOG_RE.match(s)
+            if sm:
+                search_log.append((sm.group(1), int(sm.group(3))))
+                continue
             m = LOG_RE.match(s)
             if m:
                 log_dates.append(m.group(1))
@@ -242,6 +264,10 @@ def main() -> int:
                         continue
                     if not in_file_log:
                         continue
+                    sm = SEARCH_LOG_RE.match(s)
+                    if sm:
+                        search_log.append((sm.group(1), int(sm.group(3))))
+                        continue
                     m = LOG_RE.match(s)
                     if m:
                         log_dates.append(m.group(1))
@@ -253,6 +279,15 @@ def main() -> int:
             print(f"操作日志：{len(log_dates)} 行，最后 {log_dates[-1]}（日志.md）")
         else:
             warn.append("找不到操作日志（日志.md 的 `## 操作日志`，或 大纲.md 内联）→ 清理排序与落空率统计缺少依据（§17）")
+
+    # 近 30 天检索/落空率（§19 度量）：数据源是检索行，有才报
+    if search_log:
+        cut = (date.today() - timedelta(days=30)).isoformat()
+        recent = [(d, n) for d, n in search_log if d >= cut]
+        if recent:
+            miss = sum(1 for _, n in recent if n == 0)
+            print(f"检索（近 30 天）：{len(recent)} 次 ｜ 落空 {miss} 次（{miss / len(recent):.0%}）"
+                  f"→ 高 = 覆盖不够或命名不对（详细/体检与规模.md 度量指标）")
 
     # ---------- 4. 硬检查 ----------
     if header and header[1] != entry_total:
@@ -347,6 +382,15 @@ def main() -> int:
     if legacy:
         warn.append(f"仍在使用已废弃的 `范围：` 字段 {len(legacy)} 条（{len(legacy)/max(entry_total,1):.0%}）"
                     f"→ 改成 `限制：` 一句话或直接删掉（§3）")
+
+    # 无法识别的字段段：parse_fields 归入「其它」的段此前被静默吞掉，字段名手误会无声通过全部检查
+    stray = [e for e in entries if e["fields"].get("其它")]
+    if stray:
+        sample = "；".join(
+            f"「{e['name']}」L{e['line']}：" + "、".join(str(x) for x in e["fields"]["其它"][:2])
+            for e in stray[:3])
+        warn.append(f"无法识别的字段段 {len(stray)} 处 → 疑似字段名手误或未登记的新字段：{sample}"
+                    f" → 按 §3 字段名订正；确属新字段先改 §3 再用")
 
     # 分类过碎：条目少时必然碎（7 条 6 类属正常），只在规模足够时才是信号
     singles = [(k, v) for k, v in cat_counts.items() if k[0] and v == 1]

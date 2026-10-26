@@ -374,10 +374,52 @@ def clean_cache(cache_dir: Path, force: bool = False) -> int:
 
 # ---------------------------------------------------------------- --doctor
 
+def nvidia_dll_dirs():
+    """pip 装的 nvidia-cublas-cu12 / nvidia-cudnn-cu12 里的 DLL 目录；未装或非 Windows 返回 []。"""
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("nvidia")
+        if not spec or not spec.submodule_search_locations:
+            return []
+        root = Path(list(spec.submodule_search_locations)[0])
+        dirs = []
+        for sub in ("cudnn", "cublas"):
+            for cand in (root / sub / "bin", root / sub / "lib", root / sub):
+                if cand.is_dir() and any(cand.glob("*.dll")):
+                    dirs.append(cand)
+                    break
+        return dirs
+    except Exception:
+        return []
+
+
+def enable_cuda_dlls():
+    """让进程能找到 pip 装的 cuBLAS/cuDNN DLL（ctranslate2 加载用）。双保险：
+    ① 前插 PATH——ctranslate2 走标准搜索顺序（LoadLibrary 不带标志）时生效；
+    ② os.add_dll_directory——带 USER_DIRS 标志的加载时生效。
+    手动配过 PATH/PATH 里已有 CUDA 的装法不受影响（前插的目录优先但内容一致）。
+    返回 add_dll_directory 成功注册的目录数。"""
+    dirs = nvidia_dll_dirs()
+    if dirs:
+        extra = os.pathsep.join(str(d) for d in dirs)
+        os.environ["PATH"] = extra + os.pathsep + os.environ.get("PATH", "")
+    n = 0
+    if hasattr(os, "add_dll_directory"):
+        for d in dirs:
+            try:
+                os.add_dll_directory(str(d))
+                n += 1
+            except Exception:
+                pass
+    return n
+
+
 DEPS = [
+    # (显示名, import 名, 用途, 安装命令, [兼容旧包 import 名…])
+    # rapidocr 双包兼容与 parse_pdf.make_ocr 对齐：装 v1 旧包 rapidocr_onnxruntime 不算缺依赖
     ("pymupdf", "pymupdf", "PDF 文本层提取", "pip install pymupdf"),
     ("faster-whisper", "faster_whisper", "本地语音转写", "pip install faster-whisper"),
-    ("rapidocr", "rapidocr", "扫描页 OCR 兜底", "pip install rapidocr"),
+    ("rapidocr", "rapidocr", "扫描页 OCR 兜底", "pip install rapidocr", "rapidocr_onnxruntime"),
     ("yt-dlp", "yt_dlp", "在线视频字幕/音频拉取", "pip install yt-dlp"),
     ("Pillow", "PIL", "关键帧拼图 / OCR 图像", "pip install Pillow"),
     ("numpy", "numpy", "OCR 图像数组", "pip install numpy"),
@@ -411,15 +453,28 @@ def doctor():
             return 1
 
     dep_ok = {}
-    for pkg, mod, why, fix in DEPS:
+    for dep in DEPS:
+        pkg, mod, why, fix = dep[0], dep[1], dep[2], dep[3]
+        fallbacks = dep[4:]
+        found, note, err = None, "", None
         try:
-            m = __import__(mod)
+            found = __import__(mod)
+        except Exception as primary:
+            err = primary
+            for fb in fallbacks:   # 兼容旧包（如 rapidocr v1 的 rapidocr_onnxruntime）
+                try:
+                    found = __import__(fb)
+                    note = f"（经旧包 {fb}）"
+                    break
+                except Exception:
+                    continue
+        if found is not None:
             dep_ok[pkg] = True
-            ver = getattr(m, "__version__", "")
-            print(f"✅ {pkg:<24} {why}{'  ' + ver if ver else ''}")
-        except Exception as e:
+            ver = getattr(found, "__version__", "")
+            print(f"✅ {pkg:<24} {why}{'  ' + ver if ver else ''}  {note}".rstrip())
+        else:
             dep_ok[pkg] = False
-            print(f"❌ {pkg:<24} {why} —— {fix}（{type(e).__name__}）")
+            print(f"❌ {pkg:<24} {why} —— {fix}（{type(err).__name__}）")
 
     tool_ok = {}
     for tool in ("ffmpeg", "ffprobe"):
@@ -446,14 +501,22 @@ def doctor():
 
     try:
         import ctranslate2
-        n = ctranslate2.get_cuda_device_count()
-        if n:
-            print(f"⚠ 检测到 {n} 个 CUDA 设备：有加速潜力，但需额外安装 CUDA/cuDNN 运行库并配 PATH"
-                  f"（不是改一行参数的事），当前仍按 CPU int8 运行")
-        else:
-            print("ℹ 未检测到 NVIDIA GPU，按 CPU int8 运行")
+        n_gpu = ctranslate2.get_cuda_device_count()
     except Exception:
+        n_gpu = None
+    if n_gpu is None:
         print("ℹ ctranslate2 未装，跳过 GPU 探测")
+    elif not n_gpu:
+        print("ℹ 未检测到 NVIDIA GPU：转写按 CPU 运行（默认路径，功能完整，无需任何 CUDA 组件）")
+    elif nvidia_dll_dirs():
+        print(f"✅ GPU 转写就绪（检测到 {n_gpu} 个 CUDA 设备）：parse_video 加 --device cuda 启用"
+              f"（默认仍 CPU；收益随模型/显卡而变，实测参考见 解析手册「能力总览与可选加速」）")
+    else:
+        print(f"⚠ 检测到 {n_gpu} 个 CUDA 设备，转写仍按 CPU 运行（默认路径，功能完整）。"
+              f"长视频常客可选开启 GPU 提速：")
+        print(f"    {sys.executable} -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
+        print(f"    装完重跑 --doctor 本行变 ✅；运行时 parse_video 加 --device cuda；"
+              f"不装不影响任何现有功能")
 
     ep = os.environ.get("HF_ENDPOINT")
     print(f"ℹ HF_ENDPOINT：{'已设置 ' + ep if ep else '未设置（脚本运行时会默认走 hf-mirror）'}")

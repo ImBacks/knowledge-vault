@@ -19,6 +19,8 @@
     9. 纯画面路线 + 讲述锚点：--no-transcribe 未配 --keyframes 拒绝；无音轨视频纯画面解析
        （route=visual、0 段、--max-frames 封顶）；TTS 指画面语音 + 画面合成视频 → 转写命中
        锚点词即在该时间戳抽帧（kinds 含锚点）；转写 0 段时提示纯画面路线
+    10. --device 解析（纯函数，不依赖本机有无 GPU）：cpu 恒可用；cuda 点名而无 N 卡 →
+        报错不静默回落，报错信息含 --doctor 指路
 
 中断注入钩子（正常使用不需要）：
     MATERIAL_PARSER_FAIL_AFTER_OCR_PAGES=N   OCR 完成 N 页后抛异常
@@ -38,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common as C
 import parse_pdf as PP
+import parse_video as PV
 
 PY = sys.executable
 WORK = None   # main() 里初始化：缓存根未定位时（独立装在技能目录且未设环境变量）自测直接退出并给指引
@@ -583,6 +586,23 @@ def test_sha1_index():
     report("文件变化后重算并回写", C.file_sha1_cached(f, root) == C.file_sha1(f))
 
 
+# ---------------------------------------------------------------- 10. 设备选择
+
+def test_device_resolve():
+    print("\n[10] --device 解析（纯函数，不碰硬件）：cpu 恒可用；cuda 点名而无 N 卡 → 报错不静默回落")
+    report("resolve_device cpu（有无 N 卡均可用，int8）",
+           PV.resolve_device("cpu", 0) == ("cpu", "int8")
+           and PV.resolve_device("cpu", 1) == ("cpu", "int8"))
+    report("resolve_device cuda（有 N 卡 → int8_float16）",
+           PV.resolve_device("cuda", 1) == ("cuda", "int8_float16"))
+    try:
+        PV.resolve_device("cuda", 0)
+        report("resolve_device cuda（无 N 卡）报错", False, "未报错，静默回落了")
+    except Exception as e:
+        report("resolve_device cuda（无 N 卡）报错且含 --doctor 指路",
+               "--doctor" in str(e), str(e)[:120])
+
+
 # ----------------------------------------------------------------
 
 def main():
@@ -607,6 +627,7 @@ def main():
     test_cache_env()
     test_clean()
     test_sha1_index()
+    test_device_resolve()
 
     ok = [x for x in RESULTS if x[1]]
     bad = [x for x in RESULTS if not x[1]]
