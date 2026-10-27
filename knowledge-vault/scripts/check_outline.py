@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""大纲.md 自检 + 体检工具（大纲维护员 v3 内置脚本）。
+"""大纲.md 自检 + 体检工具（knowledge-vault v3 内置脚本）。
 
 用法:
     python check_outline.py <大纲.md 路径>

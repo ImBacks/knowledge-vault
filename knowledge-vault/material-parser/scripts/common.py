@@ -27,7 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 # 库根探测：从脚本位置逐级向上找 大纲.md（模块可嵌在技能目录任意深度，
-# 如 库根/outline-maintainer/material-parser/scripts/）。找不到且未设 MATERIAL_PARSER_CACHE
+# 如 库根/knowledge-vault/material-parser/scripts/）。找不到且未设 MATERIAL_PARSER_CACHE
 # 时，解析入口会明确报错要求指定缓存根（防静默落错位置）。
 SCRIPTS_DIR = Path(__file__).resolve().parent
 ENV_CACHE = "MATERIAL_PARSER_CACHE"
@@ -338,7 +338,7 @@ def run_ffmpeg(args, check=True, capture=False):
 def clean_cache(cache_dir: Path, force: bool = False) -> int:
     """入库落盘成功后清理该材料的缓存目录。
 
-    缓存是收录期间的工作台，不是档案（outline-maintainer §7）。只删 status=done 的；
+    缓存是收录期间的工作台，不是档案（knowledge-vault §7）。只删 status=done 的；
     未完成任务的缓存是断点，拒绝删除（--force 才删）；有任务在跑（lock.pid）一律拒绝。
     """
     utf8_console()

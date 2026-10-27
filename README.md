@@ -1,4 +1,4 @@
-# outline-maintainer · 大纲维护员
+# knowledge-vault · 收录知识库
 
 给 AI 助手（Claude Code / ZCode 等支持 SKILL 的 agent）用的个人知识库技能：把「现在觉得有用、还不知道何时会用到」的工具和知识收进一个私人候选池，**做项目之前回来检索有没有能用上的**。
 
@@ -13,7 +13,7 @@
 
 - **AI 原生的信息架构**：单文件索引（`大纲.md`）+ 长正文外置（`知识/`），索引体积只随条数增长、不随内容长度增长——这是大库能存在的前提，也是防 LLM 上下文爆炸的根本设计。规模路径预先推演到位（700 条分片 / 千条上 FTS5 / 百万档预案，见 `详细/体检与规模.md`），什么时候换什么工具是算术题，不是玄学。
 
-- **为 agent 写的运行手册**：SKILL.md 是可版本化的 agent 指令层——982 行手册按「检索会话零额外载入」做模块化路由，§ 编号跨文件稳定引用；「skill 是死的、AI 是活的」原则给 agent 划出裁量空间与不可裁量的底线；v3→v33 的每次修订全部留痕（每条规则为什么存在、是哪次审查暴露的问题）。
+- **为 agent 写的运行手册**：SKILL.md 是可版本化的 agent 指令层——982 行手册按「检索会话零额外载入」做模块化路由，§ 编号跨文件稳定引用；「skill 是死的、AI 是活的」原则给 agent 划出裁量空间与不可裁量的底线；v3→v35 的每次修订全部留痕（每条规则为什么存在、是哪次审查暴露的问题）。
 
 - **LLM 与传统工具的分工设计**：自动化不迷信——大文件按**成本比**决策（工具路线快 2 倍以上才值得走脚本，阈值表只是预计算答案）；机械部分归脚本（OCR 断点续跑、缓存键、编译校验），判断归 agent（材料分型、解析开关裁剪）；每条自动化都有明写的降级链路（依赖缺席 → 先提议 → 降级直读/手工），工具缺席永不卡死流程。
 
@@ -27,10 +27,10 @@
 
 ## 安装
 
-1. 把 `outline-maintainer/` 目录整个复制进你的技能目录（或任意位置）。
-2. **库根定位**：技能默认从自身位置向上找 `大纲.md` 定位库根；装在库根之外时设环境变量 `MATERIAL_PARSER_CACHE=<库根>/解析缓存`（详见 `outline-maintainer/SKILL.md` 配置节）。
-3. **依赖全部可选**：用真实 Python 解释器跑 `material-parser/scripts/common.py --doctor`，按用途报缺哪些并给精确安装命令（完整清单见下方「工具清单」）。注意 Windows 商店版 `python` 是占位 stub 跑不起来——用实际安装路径，本机约定见 `outline-maintainer/SKILL.md` 配置节。不装也能用——agent 直接读原件，慢一些。
-4. **自检**：`python outline-maintainer/scripts/selftest.py`（四个库级脚本全合成数据自检，不碰真实库、不联网）；`python outline-maintainer/material-parser/scripts/selftest.py` 验解析子模块——后者需先能定位缓存根（在库根目录下运行，或设 `MATERIAL_PARSER_CACHE`），否则会按设计报错退出。
+1. 把 `knowledge-vault/` 目录整个复制进你的技能目录（或任意位置）。
+2. **库根定位**：技能默认从自身位置向上找 `大纲.md` 定位库根；装在库根之外时设环境变量 `MATERIAL_PARSER_CACHE=<库根>/解析缓存`（详见 `knowledge-vault/SKILL.md` 配置节）。
+3. **依赖全部可选**：用真实 Python 解释器跑 `material-parser/scripts/common.py --doctor`，按用途报缺哪些并给精确安装命令（完整清单见下方「工具清单」）。注意 Windows 商店版 `python` 是占位 stub 跑不起来——用实际安装路径，本机约定见 `knowledge-vault/SKILL.md` 配置节。不装也能用——agent 直接读原件，慢一些。
+4. **自检**：`python knowledge-vault/scripts/selftest.py`（四个库级脚本全合成数据自检，不碰真实库、不联网）；`python knowledge-vault/material-parser/scripts/selftest.py` 验解析子模块——后者需先能定位缓存根（在库根目录下运行，或设 `MATERIAL_PARSER_CACHE`），否则会按设计报错退出。
 
 ## 工具清单：默认与可选
 
@@ -59,7 +59,7 @@
 ## 目录
 
 ```
-outline-maintainer/
+knowledge-vault/
 ├── SKILL.md        技能本体（任务分发 + 常驻核心：开局 / 模式 / 检索 / 降级安全 / 日志检索侧）
 ├── 详细/            流程与分型细则模块，按需读、检索会话零模块：
 │                     收录主流程 · 写入协议 · 维护 · 素材处理 · 条目格式与正文 · 视频 · 图片 · 文档 · 体检与规模 · 导入合并

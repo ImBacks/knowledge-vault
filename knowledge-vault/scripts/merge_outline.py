@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""大纲单向导入分诊器（大纲维护员 v3 内置脚本，§20）。
+"""大纲单向导入分诊器（knowledge-vault v3 内置脚本，§20）。
 
 用法:
     python merge_outline.py <本库大纲.md> <对方大纲.md 或对方库根> [--json 输出.json] [--limit 40]
