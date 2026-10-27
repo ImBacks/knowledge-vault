@@ -7,7 +7,7 @@
 
 覆盖：
 1. write_lock 全路径：取锁成功 → 占用拒绝 → status → 强夺 → 错令牌拒释放 →
-   正令牌释放 → 过期自动接管 → 锁文件损坏自动接管 → 无锁时释放。
+   正令牌释放 → 过期自动接管 → 锁文件损坏自动接管 → 无锁时释放 → --lease 非整数报用法。
 2. merge_outline 四类分诊（合成 双库）：A 直接并入（含知识正文路径计划）、
    B 同名同物（活/核取新、别名并集、用法追加）、C 疑似同物（异名同 URL）、
    D 同名需仲裁（同名异源）、对方库内部重复跳过、`- 相关：` 悬空告警、
@@ -114,6 +114,11 @@ def test_write_lock(root: Path):
 
     r9 = run("write_lock.py", md, "release", "--token", "0" * 16)
     check("无锁时释放=提示非错误", r9.returncode == 0 and "不存在" in r9.stdout, r9.stdout)
+
+    r10 = run("write_lock.py", md, "acquire", "--lease", "abc")
+    check("--lease 非整数报用法而非裸栈",
+          r10.returncode == 2 and "--lease" in r10.stdout and "Traceback" not in r10.stderr,
+          r10.stdout + r10.stderr)
 
 
 # ------------------------------------------------------------- merge_outline

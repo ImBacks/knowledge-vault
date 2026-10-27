@@ -272,10 +272,15 @@ def main() -> int:
         return 2
     limit = 40
     if "--limit" in args:
+        i = args.index("--limit")
+        if i + 1 >= len(args):
+            print("错误：--limit 需要一个值（如 --limit 100）")
+            return 2
         try:
-            limit = int(args[args.index("--limit") + 1])
-        except (IndexError, ValueError):
-            pass
+            limit = int(args[i + 1])
+        except ValueError:
+            print(f"错误：--limit 需要整数（收到：{args[i + 1]!r}）")
+            return 2
 
     tgt = parse_outline(tgt_md, "本库")
     src = parse_outline(src_md, "对方")

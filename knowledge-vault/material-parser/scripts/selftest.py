@@ -2,7 +2,7 @@
 """material-parser 合成数据自测：不依赖真实素材验证全链路。
 
 用法：
-    D:\\python\\python.exe scripts/selftest.py [--keep]
+    python scripts/selftest.py [--keep]
 
 覆盖（对应方案验收 1–4；B站在线链路待真实 URL 实测，CC/AI 路径用离线桩守住）：
     1. fitz 合成 ~1000 页文本 PDF → 解析/书签分块/缓存秒回/参数变化重建/改名不失效

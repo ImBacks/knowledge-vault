@@ -174,7 +174,12 @@ def main() -> int:
         return args[args.index(flag) + 1] if flag in args else default
 
     if cmd == "acquire":
-        lease = int(opt_value("--lease", DEFAULT_LEASE))
+        raw = opt_value("--lease", DEFAULT_LEASE)
+        try:
+            lease = int(raw)
+        except (TypeError, ValueError):
+            print(f"错误：--lease 需要整数秒（如 --lease 1800），收到：{raw!r}")
+            return 2
         return cmd_acquire(md, lease, "--force" in args)
     if cmd == "release":
         return cmd_release(md, opt_value("--token", ""), "--force" in args)

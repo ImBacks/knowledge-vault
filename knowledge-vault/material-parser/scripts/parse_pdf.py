@@ -2,7 +2,7 @@
 """大 PDF / EPUB 快速解析：文本层直提 + 扫描页逐页 OCR 兜底 + 书签/页数分块。
 
 用法：
-    D:\\python\\python.exe scripts/parse_pdf.py <PDF/EPUB 路径> [--chunk-pages 50] [--dpi 150]
+    python scripts/parse_pdf.py <PDF/EPUB 路径> [--chunk-pages 50] [--dpi 150]
                                                    [--no-ocr] [--force] [--cache-root 目录]
 
 产物（解析缓存/<文件名>-<sha1前10位>/）：
@@ -100,7 +100,7 @@ def write_overview(cache_dir: Path, src_name, sha1, n_pages, stats, chunks, toc,
              f"- sha1：{sha1[:10]} ｜ 页数：{n_pages} ｜ 生成：{C.today()}",
              f"- 文本层：{stats['text_pages']} 页直提"
              f" ｜ OCR：{stats['ocr_pages']} 页{'（' + stats['ocr_brief'] + '）' if stats['ocr_brief'] else ''}",
-             f"- 分块：{len(chunks)} 块（书签分章 + 每块 ≤{params['chunk_pages']} 页）"
+             f"- 分块：{len(chunks)} 块（书签分章，超长章按 ≤{params['chunk_pages']} 页拆段）"
              if toc else
              f"- 分块：{len(chunks)} 块（无书签，每 {params['chunk_pages']} 页一块）",
              "",

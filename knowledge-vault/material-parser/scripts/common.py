@@ -3,8 +3,8 @@
 
 所有解析脚本共用本模块。单独运行可做依赖自检 / 入库后清缓存：
 
-    D:\\python\\python.exe scripts/common.py --doctor
-    D:\\python\\python.exe scripts/common.py --clean <缓存目录> [--force]
+    python scripts/common.py --doctor
+    python scripts/common.py --clean <缓存目录> [--force]
 
 缓存语义（详见 解析手册.md）：
 - 缓存根三级：--cache-root 参数 > MATERIAL_PARSER_CACHE 环境变量 > 向上找 大纲.md 定位库根

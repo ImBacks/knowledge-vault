@@ -2,7 +2,7 @@
 """音视频/在线视频解析：字幕优先（CC → AI → 本地转写兜底）+ 分块缓存 + 关键帧。
 
 用法：
-    D:\\python\\python.exe scripts/parse_video.py <视频/音频路径 或 URL>
+    python scripts/parse_video.py <视频/音频路径 或 URL>
         [--model small] [--language zh] [--chunk-sec 600] [--keyframes]
         [--no-transcribe] [--max-frames 120] [--cue-words 词1,词2] [--keep-audio]
         [--device cpu|cuda] [--cookies chrome|edge|firefox|brave] [--force] [--cache-root 目录]
