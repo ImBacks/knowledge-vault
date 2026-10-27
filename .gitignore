@@ -15,6 +15,10 @@
 # 解析产物缓存（material-parser 生成，可随时删除重建，不进版本库）
 解析缓存/
 
+# 视频抓取 cookies（站点登录凭据！绝对不进版本库——泄露等于交出账号）
+knowledge-vault/cookies/
+cookies/
+
 # 落盘互斥锁（write_lock.py 生成，租期制短暂存在，不进版本库）
 .写入锁
 

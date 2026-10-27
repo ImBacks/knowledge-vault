@@ -311,7 +311,7 @@ def test_tts_transcribe():
     if stale:
         shutil.rmtree(stale[0], ignore_errors=True)  # TTS 输出字节级确定，残留缓存会吞掉注入中断
     r = run_script("parse_video.py", str(wav_raw), "--cache-root", str(CACHE),
-                   "--language", "zh", env_extra={C.ENV_FAIL_SEG: "3"})
+                   "--language", "zh", "--no-batched", env_extra={C.ENV_FAIL_SEG: "3"})
     found = C.find_cache_by_sha1(CACHE, sha)
     seg_path = found[0] / "segments.jsonl" if found else None
     lines = seg_path.read_text(encoding="utf-8").strip().splitlines() if seg_path and seg_path.exists() else []
@@ -352,6 +352,16 @@ def test_tts_transcribe():
            and (cache_dir / "chunks").exists() and (cache_dir / "概览.md").exists(),
            (r.stdout or "")[-200:].replace("\n", " ") if r.returncode else "")
 
+    print("  批处理路线（默认开）冒烟：清缓存全新转写，产物非空且提示批处理")
+    shutil.rmtree(cache_dir, ignore_errors=True)
+    r = run_script("parse_video.py", str(wav_raw), "--cache-root", str(CACHE), "--language", "zh")
+    found2 = C.find_cache_by_sha1(CACHE, sha)
+    seg2 = found2[0] / "segments.jsonl" if found2 else None
+    n2 = len(seg2.read_text(encoding="utf-8").strip().splitlines()) if seg2 and seg2.exists() else 0
+    report("批处理转写完成且产物非空（段数≥1）",
+           r.returncode == 0 and n2 > 0 and "批处理" in (r.stdout or ""),
+           f"退出码 {r.returncode}，段数 {n2}；{(r.stdout or '')[-150:]}".replace("\n", " "))
+
 
 # ---------------------------------------------------------------- 4. 视频管线
 
@@ -365,6 +375,9 @@ def test_video_pipeline():
                       "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
                       str(video)], capture=True)
 
+    stale = C.find_cache_by_sha1(CACHE, C.file_sha1(video))
+    if stale:
+        shutil.rmtree(stale[0], ignore_errors=True)  # 自测要覆盖全新解析路径（含 0 段提示行），不吃上次残留缓存
     r = run_script("parse_video.py", str(video), "--cache-root", str(CACHE),
                    "--keyframes", "--language", "zh")
     report("解析退出码 0", r.returncode == 0, (r.stderr or "")[-300:] if r.returncode else "")
@@ -428,6 +441,9 @@ def test_visual_and_cues():
     print("  纯画面：无音轨切变视频 → 不转写直接抽帧（独立缓存根，避开转写缓存）")
     root2 = CACHE / "visualroot"
     cut = WORK / "自测-切变.mp4"
+    stale = C.find_cache_by_sha1(root2, C.file_sha1(cut))
+    if stale:
+        shutil.rmtree(stale[0], ignore_errors=True)  # 同理：全新纯画面路径，提示行不受上次缓存影响
     r = run_script("parse_video.py", str(cut), "--cache-root", str(root2),
                    "--no-transcribe", "--keyframes", "--max-frames", "60")
     ok = r.returncode == 0 and "纯画面" in (r.stdout or "")
@@ -589,7 +605,8 @@ def test_sha1_index():
 # ---------------------------------------------------------------- 10. 设备选择
 
 def test_device_resolve():
-    print("\n[10] --device 解析（纯函数，不碰硬件）：cpu 恒可用；cuda 点名而无 N 卡 → 报错不静默回落")
+    print("\n[10] --device 解析（纯函数，不碰硬件）：cpu 恒可用；cuda 点名而无 N 卡 → 报错不静默回落；"
+          "auto 有卡走 GPU 无卡走 CPU")
     report("resolve_device cpu（有无 N 卡均可用，int8）",
            PV.resolve_device("cpu", 0) == ("cpu", "int8")
            and PV.resolve_device("cpu", 1) == ("cpu", "int8"))
@@ -601,6 +618,24 @@ def test_device_resolve():
     except Exception as e:
         report("resolve_device cuda（无 N 卡）报错且含 --doctor 指路",
                "--doctor" in str(e), str(e)[:120])
+    report("resolve_device auto（有 N 卡 → cuda/int8_float16）",
+           PV.resolve_device("auto", 1) == ("cuda", "int8_float16"))
+    report("resolve_device auto（无 N 卡 → cpu/int8）",
+           PV.resolve_device("auto", 0) == ("cpu", "int8"))
+    report("canonicalize_url 抖音 note→video 重写",
+           PV.canonicalize_url("https://www.douyin.com/note/123?x=1")
+           == "https://www.douyin.com/video/123?x=1"
+           and "note" not in PV.canonicalize_url("https://v.douyin.com/abc/"))
+
+
+def test_config_view():
+    print("\n[12] 当前配置视图（common.py --config）：退出 0 + 关键行齐全")
+    r = run_script("common.py", "--config")
+    out = r.stdout or ""
+    report("--config 退出 0 且含 引擎/设备/cookies/缓存根 行",
+           r.returncode == 0 and "faster-whisper" in out and "转写设备" in out
+           and "cookies" in out and "缓存根" in out,
+           (r.stderr or "")[-200:] if r.returncode else "")
 
 
 def test_distill():
@@ -656,6 +691,7 @@ def main():
     test_sha1_index()
     test_device_resolve()
     test_distill()
+    test_config_view()
 
     ok = [x for x in RESULTS if x[1]]
     bad = [x for x in RESULTS if not x[1]]

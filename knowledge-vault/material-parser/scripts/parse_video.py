@@ -10,9 +10,11 @@
 在线视频三级链路（yt-dlp 支持的站点均可：B站/抖音/TikTok/YouTube 等）：
     1. CC 字幕：yt-dlp 只拉字幕不下载，秒级，免登录；
     2. AI 字幕：--cookies 走浏览器登录态拉取（需本机浏览器已登录该站）；
-    3. 兜底：下载音频 → faster-whisper 本地转写（默认 CPU int8，约视频时长的 0.3~0.6 倍；
-       本机有 N 卡可加 --device cuda 提速（实测参考见解析手册），环境自检 common.py --doctor，后台跑）。
-    抖音类站点普遍无 CC/AI 字幕，基本确定落兜底转写；部分内容需 --cookies。
+    3. 兜底：下载音频 → faster-whisper 本地转写（设备默认 auto：自动检测 N 卡走 GPU
+       int8_float16，无卡或初始化失败自动回落 CPU int8 并说明；显式 --device cpu/cuda 照旧；
+       批处理默认开 --no-batched 关；CPU 口径约视频时长的 0.3~0.6 倍，实测参考见解析手册）。
+    抖音类站点普遍无 CC/AI 字幕，基本确定落兜底转写；需登录站点（抖音等）必配 --cookies
+    （浏览器名或 cookies.txt 文件路径，导法见 详细/视频.md），登录态贯通 信息/字幕/下载 三级。
 
 关键帧双信号（--keyframes，调用方按视频类型自行取舍，工具不替人分类）：
     - 场景检测：画面突变（翻页/切屏/镜头切换）处抽帧，阈值 0.2；
@@ -45,7 +47,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common as C
@@ -68,9 +70,63 @@ def normalize_url(url):
         return url.strip()
 
 
+def canonicalize_url(url):
+    """入口归一化：抖音 /note/<id>（图文笔记形态的分享链接）与 /video/<id> 是同一视频，
+    yt-dlp 只认后者——不重写会在抽取器上直接 Unsupported URL。"""
+    return re.sub(r"(douyin\.com)/note/(\d+)", r"\1/video/\2", url.strip())
+
+
+SHORT_LINK_HOSTS = {"v.douyin.com", "b23.tv"}
+
+
+def resolve_short_link(url):
+    """短链先解开 302 再进抽取器：/note/ 形态是跳转后出现的，入口重写够不着。
+    只对已知短链 host 生效（自测的 example.com 等不受影响）；解不开原样返回，不卡死。"""
+    try:
+        if urlparse(url).netloc.lower() not in SHORT_LINK_HOSTS:
+            return url
+        import urllib.error
+        import urllib.request
+
+        class _NoRedir(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        cur = url
+        for _ in range(3):
+            req = urllib.request.Request(cur, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                with urllib.request.build_opener(_NoRedir).open(req, timeout=10) as resp:
+                    cur = resp.geturl()
+                    break
+            except urllib.error.HTTPError as e:
+                loc = e.headers.get("Location")
+                if not loc:
+                    break
+                cur = urljoin(cur, loc)
+        return cur
+    except Exception:
+        return url
+
+
 # ---------------------------------------------------------------- 在线链路
 
-def ydl_info(url):
+def _cookie_opts(cookies):
+    """--cookies → yt-dlp 选项：.txt 文件走 cookiefile，浏览器名走 cookiesfrombrowser。
+    Windows Chrome/Edge 新版 cookie 加密常致浏览器方式拉空，cookies.txt（扩展导出）是可靠路。"""
+    if not cookies:
+        return {}
+    if cookies.lower().endswith(".txt") or Path(cookies).exists():
+        p = Path(cookies)
+        if not p.exists():
+            raise RuntimeError(f"cookies 文件不存在：{p}")
+        return {"cookiefile": str(p)}
+    if cookies not in ("chrome", "edge", "firefox", "brave"):
+        raise RuntimeError(f"--cookies 只接受 chrome/edge/firefox/brave 或 cookies.txt 路径，得到：{cookies}")
+    return {"cookiesfrombrowser": (cookies,)}
+
+
+def ydl_info(url, cookies=None):
     fake = os.environ.get(C.ENV_FAKE_SUBS)  # selftest 离线桩
     if fake:
         return {"title": "自测-字幕视频", "duration": 120,
@@ -78,6 +134,7 @@ def ydl_info(url):
     try:
         import yt_dlp
         opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True}
+        opts.update(_cookie_opts(cookies))
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)
     except Exception as e:
@@ -107,8 +164,7 @@ def fetch_subs(url, cache_dir: Path, cookies=None, auto=False):
         "no_warnings": True,
         "noplaylist": True,
     }
-    if cookies:
-        opts["cookiesfrombrowser"] = (cookies,)
+    opts.update(_cookie_opts(cookies))
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
@@ -160,7 +216,7 @@ def parse_vtt(path: Path):
     return segs
 
 
-def download_media(url, cache_dir: Path, want_video=False) -> Path:
+def download_media(url, cache_dir: Path, want_video=False, cookies=None) -> Path:
     import yt_dlp
     opts = {
         # 要视频只为了关键帧（缩略图 240px 宽），封顶 1080p，不拉 4K 浪费流量和磁盘
@@ -168,7 +224,10 @@ def download_media(url, cache_dir: Path, want_video=False) -> Path:
         "outtmpl": str(cache_dir / "media.%(ext)s"),
         "merge_output_format": "mp4",
         "quiet": True, "no_warnings": True, "noplaylist": True,
+        # 分段多线程：B站/YouTube 单连接限速，8 连接接近满带宽
+        "concurrent_fragment_downloads": 8,
     }
+    opts.update(_cookie_opts(cookies))
     print(f"  下载{'视频（含画面，供关键帧）' if want_video else '音频'} …")
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
@@ -239,6 +298,7 @@ def write_segments_jsonl(segments, seg_path: Path):
 
 def resolve_device(requested, cuda_count):
     """--device → (device, compute_type)。cuda 点名而本机没有 N 卡 → 报错不静默回落；
+    auto（默认）→ 有 N 卡走 GPU，否则 CPU（初始化失败在调用方回落 CPU 并说明，不报错）；
     --device 不进缓存键（transcribe_params 只记 model/language），换设备沿用已转写缓存。"""
     if requested == "cuda":
         if not cuda_count:
@@ -246,6 +306,8 @@ def resolve_device(requested, cuda_count):
                                "去掉该参数按 CPU 跑（默认路径，功能完整），"
                                "或跑 common.py --doctor 查看环境")
         return "cuda", "int8_float16"
+    if requested == "auto":
+        return ("cuda", "int8_float16") if cuda_count else ("cpu", "int8")
     return "cpu", "int8"
 
 
@@ -261,20 +323,31 @@ def transcribe(wav: Path, cache_dir: Path, args) -> int:
         print(f"  断点续跑：已有 {len(existing)} 段，从 {C.fmt_ts(resume_from)} 继续")
 
     cuda_count = ctranslate2.get_cuda_device_count()
-    device, compute_type = resolve_device(getattr(args, "device", "cpu"), cuda_count)
+    requested = getattr(args, "device", "auto")
+    device, compute_type = resolve_device(requested, cuda_count)
     if device == "cuda":
         C.enable_cuda_dlls()  # 注册 pip 装的 cuBLAS/cuDNN DLL 目录（手动配 PATH 的装法不受影响）
+    if requested == "auto":
+        print(f"  设备自动检测：{'GPU（N 卡）' if device == 'cuda' else 'CPU（无 N 卡）'}"
+              f"（--device cpu 可强制 CPU）")
     print(f"  加载 whisper {args.model}（{compute_type} / {device.upper()}，"
           f"首次运行会先下载模型走 hf-mirror）…")
     try:
         model = WhisperModel(args.model, device=device, compute_type=compute_type)
     except Exception as e:
-        if device == "cuda":
+        if device == "cuda" and requested == "auto":
+            # auto 是尽力而为：初始化失败回落 CPU 并说明，不报错卡死（显式 cuda 仍报错不静默回落）
+            print(f"  ⚠ GPU 初始化失败（{type(e).__name__}），本次自动回落 CPU：{str(e)[:140]}")
+            print("    根治跑 common.py --doctor（通常缺 nvidia-cublas-cu12 / nvidia-cudnn-cu12 或驱动过旧）")
+            device, compute_type = "cpu", "int8"
+            model = WhisperModel(args.model, device=device, compute_type=compute_type)
+        elif device == "cuda":
             raise RuntimeError(
                 f"CUDA 初始化失败（{type(e).__name__}）：{str(e)[:200]}。"
                 f"跑 common.py --doctor 查缺什么（通常缺 nvidia-cublas-cu12 / nvidia-cudnn-cu12"
                 f" 或 NVIDIA 驱动过旧）；去掉 --device 按 CPU 跑。") from e
-        raise
+        else:
+            raise
     kw = {"vad_filter": True, "vad_parameters": {"min_silence_duration_ms": 500}}
     if args.language:
         kw["language"] = args.language
@@ -287,10 +360,19 @@ def transcribe(wav: Path, cache_dir: Path, args) -> int:
             resume_from = 0.0
 
     limit = C.test_limit(C.ENV_FAIL_SEG)
+    engine = model
+    if not getattr(args, "no_batched", False) and resume_from == 0.0:
+        # 批处理：整段分批并行解码，GPU 上再快数倍；断点续跑仍走原逐段路线（clip_timestamps 语义不动）
+        try:
+            from faster_whisper import BatchedInferencePipeline
+            engine = BatchedInferencePipeline(model=model)
+            print("  批处理转写已启用（--no-batched 可关）")
+        except Exception:
+            pass  # 旧版无该接口，按原逐段路线（功能不变）
     print("  转写中（VAD 过滤静音，段落实时落盘）…")
     t0, n_new = time.time(), 0
     with open(seg_path, "a", encoding="utf-8") as f:
-        iter_segments, info = model.transcribe(str(wav), **kw)
+        iter_segments, info = engine.transcribe(str(wav), **kw)
         for seg in iter_segments:
             if seg.start < resume_from - 0.5:
                 continue  # 续跑边界重叠防护
@@ -312,9 +394,8 @@ def transcribe(wav: Path, cache_dir: Path, args) -> int:
     speed = f"，{elapsed / proc:.2f}x 实时" if proc and proc > 0 else ""
     print(f"  转写完成：共 {total} 段（本次新增 {n_new}），耗时 {elapsed:.0f} 秒{speed}")
     if elapsed >= 600 and device == "cpu" and cuda_count:
-        print("  ℹ 本次 CPU 转写用时较长；本机有 NVIDIA GPU，装好 CUDA 运行库后加 --device cuda "
-              "可提速（收益随模型/显卡而变；环境自检 common.py --doctor，"
-              "菜单与实测数字见项目 README「工具清单：默认与可选」）")
+        print("  ℹ 本次长转写按 CPU 完成；本机有 NVIDIA GPU 但未走 GPU（可能缺 CUDA 运行库或初始化失败），"
+              "common.py --doctor 查环境、--config 看当前配置")
     return total
 
 
@@ -326,7 +407,7 @@ def ensure_wav(cache_dir: Path, manifest, args, is_url, url) -> Path:
     if is_url:
         media = cache_dir / manifest["media_file"] if manifest.get("media_file") else None
         if not media or not media.exists():
-            media = download_media(url, cache_dir, want_video=False)
+            media = download_media(url, cache_dir, want_video=False, cookies=args.cookies)
             manifest["media_file"] = media.name
             C.save_manifest(cache_dir, manifest)
         return to_wav(media, cache_dir)
@@ -426,7 +507,8 @@ def extract_keyframes(video_path: Path, cache_dir: Path, manifest, segments=None
     if not times:
         dur = probe_duration(video_path)
         # 采样间隔按时长自适应：2 小时视频若仍每 30 秒采会超 120 帧，只覆盖前段
-        interval = max(30, math.ceil(dur / max_frames)) if dur else 30
+        # 间隔=时长/封顶数，下限 1 秒——短视频（3 秒）若也按 30 秒采样会一帧都抽不到
+        interval = max(1, math.ceil(dur / max_frames)) if dur else 30
         print(f"  场景检测无命中 → 每 {interval} 秒采样兜底")
         times = _ffmpeg_frames(video_path, kf_dir, f"fps=1/{interval}")
     frames = sorted(kf_dir.glob("kf_*.jpg"))
@@ -491,7 +573,7 @@ def ensure_keyframes(cache_dir: Path, manifest, args, is_url, url, src_path):
     if is_url:
         media = cache_dir / manifest["media_file"] if manifest.get("media_file") else None
         if not media or not media.exists():
-            media = download_media(url, cache_dir, want_video=True)
+            media = download_media(url, cache_dir, want_video=True, cookies=args.cookies)
             manifest["media_file"] = media.name
             C.save_manifest(cache_dir, manifest)
         extract_keyframes(media, cache_dir, manifest, segments=segments,
@@ -598,9 +680,10 @@ def main():
     ap = argparse.ArgumentParser(description="音视频/在线视频解析（字幕优先 → 转写兜底 → 分块缓存）")
     ap.add_argument("input", help="本地视频/音频路径，或在线视频 URL（B站等）")
     ap.add_argument("--model", default="small", help="whisper 模型：tiny/base/small/medium/large-v3（默认 small）")
-    ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
-                    help="转写设备（默认 cpu，全功能；cuda 需 N 卡 + CUDA 运行库，"
-                         "环境自检 common.py --doctor，菜单见 README「工具清单：默认与可选」）")
+    ap.add_argument("--device", default="auto", choices=["cpu", "cuda", "auto"],
+                    help="转写设备：默认 auto 自动检测 N 卡（缺 CUDA 运行库自动回落 CPU 并说明）；"
+                         "cpu/cuda 显式点名（cuda 无卡报错不静默回落）；环境自检 common.py --doctor，"
+                         "当前配置 common.py --config")
     ap.add_argument("--language", default=None, help="语言代码（如 zh），默认自动检测")
     ap.add_argument("--chunk-sec", type=int, default=C.DEFAULT_CHUNK_SEC, help="每块秒数（默认 600）")
     ap.add_argument("--keyframes", action="store_true", help="抽取关键帧（场景检测 + 讲述锚点）并生成缩略图对照表")
@@ -611,8 +694,12 @@ def main():
     ap.add_argument("--cue-words", default=None,
                     help="讲述锚点词表（逗号分隔），按视频内容自定；传空串禁用锚定，默认用内置表")
     ap.add_argument("--keep-audio", action="store_true", help="保留中间 wav / 下载的媒体文件")
-    ap.add_argument("--cookies", choices=["chrome", "edge", "firefox", "brave"],
-                    help="从指定浏览器取登录态拉 AI 字幕（浏览器需已登录）")
+    ap.add_argument("--cookies", default=None,
+                    help="登录态来源：浏览器名（chrome/edge/firefox/brave，需已登录）或 cookies.txt "
+                         "文件路径（扩展「Get cookies.txt LOCALLY」导出，导法见 详细/视频.md）；"
+                         "需登录站点（抖音等）信息/字幕/下载三级通用")
+    ap.add_argument("--no-batched", action="store_true",
+                    help="关掉批处理转写（默认开；遇兼容问题可关，走原逐段路线）")
     ap.add_argument("--force", action="store_true", help="忽略缓存全部重做")
     ap.add_argument("--cache-root", default=None,
                     help="缓存根目录（默认：MATERIAL_PARSER_CACHE 或向上定位 <库根>/解析缓存）")
@@ -628,8 +715,8 @@ def main():
     is_url = bool(re.match(r"^https?://", args.input.strip()))
     url, src_path = None, None
     if is_url:
-        url = args.input.strip()
-        info = ydl_info(url)
+        url = canonicalize_url(resolve_short_link(args.input.strip()))
+        info = ydl_info(url, cookies=args.cookies)
         display = (info or {}).get("title") or url
         duration = (info or {}).get("duration")
         # 缓存键优先「站点+视频ID」：短链/去参链接/完整链接同一视频共用一份缓存；
@@ -758,7 +845,7 @@ def main():
             # 显式换模型/语言 → 跳过字幕链路，按新参数重新转写
             seg_path.unlink(missing_ok=True)
             if is_url:
-                media = download_media(url, cache_dir, want_video=args.keyframes)
+                media = download_media(url, cache_dir, want_video=args.keyframes, cookies=args.cookies)
                 manifest["media_file"] = media.name
                 C.save_manifest(cache_dir, manifest)
                 wav = to_wav(media, cache_dir)
@@ -787,9 +874,8 @@ def main():
                         route = "ai"
                         print(f"  ✅ AI 字幕：{len(segs)} 段")
                 if segs is None:
-                    print(f"[3/3] 字幕不可用 → 下载音频本地转写（{args.device.upper()}，"
-                          f"{'慢，' if args.device == 'cpu' else ''}建议后台跑）…")
-                    media = download_media(url, cache_dir, want_video=False)
+                    print("[3/3] 字幕不可用 → 下载音频本地转写（设备自动检测，建议后台跑）…")
+                    media = download_media(url, cache_dir, want_video=False, cookies=args.cookies)
                     manifest["media_file"] = media.name
                     C.save_manifest(cache_dir, manifest)
                     wav = to_wav(media, cache_dir)

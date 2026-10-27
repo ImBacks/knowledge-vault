@@ -529,15 +529,15 @@ def doctor():
     if n_gpu is None:
         print("ℹ ctranslate2 未装，跳过 GPU 探测")
     elif not n_gpu:
-        print("ℹ 未检测到 NVIDIA GPU：转写按 CPU 运行（默认路径，功能完整，无需任何 CUDA 组件）")
+        print("ℹ 未检测到 NVIDIA GPU：转写按 CPU 运行（auto 自动落此路径，功能完整，无需任何 CUDA 组件）")
     elif nvidia_dll_dirs():
-        print(f"✅ GPU 转写就绪（检测到 {n_gpu} 个 CUDA 设备）：parse_video 加 --device cuda 启用"
-              f"（默认仍 CPU；收益随模型/显卡而变，实测参考见 解析手册「能力总览与可选加速」）")
+        print(f"✅ GPU 转写就绪（检测到 {n_gpu} 个 CUDA 设备）：parse_video 默认 auto 已自动启用"
+              f"（--device cpu 可强制 CPU；收益随模型/显卡而变，实测参考见 解析手册「能力总览与可选加速」）")
     else:
-        print(f"⚠ 检测到 {n_gpu} 个 CUDA 设备，转写仍按 CPU 运行（默认路径，功能完整）。"
-              f"长视频常客可选开启 GPU 提速：")
+        print(f"⚠ 检测到 {n_gpu} 个 CUDA 设备，但缺 CUDA 运行库（auto 会自动回落 CPU 并说明）。"
+              f"长视频常客建议装好启用 GPU：")
         print(f"    {sys.executable} -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
-        print(f"    装完重跑 --doctor 本行变 ✅；运行时 parse_video 加 --device cuda；"
+        print(f"    装完重跑 --doctor 本行变 ✅，parse_video 默认 auto 即自动走 GPU；"
               f"不装不影响任何现有功能")
 
     ep = os.environ.get("HF_ENDPOINT")
@@ -547,7 +547,75 @@ def doctor():
     return 0 if ok else 1
 
 
+def cmd_config():
+    """当前生效配置一览（只读，不探测安装、不联网）。用户问「当前配置 / 用的什么工具 /
+    GPU 开没开」时 agent 跑这个，把输出翻成一句话；缺什么装什么走 --doctor。
+    每件工具都注明它在本技能流水线中的角色——报配置必须报「它是干什么用的」。"""
+    utf8_console()
+    import importlib.metadata as im
+
+    def ver(pkg):
+        try:
+            return im.version(pkg)
+        except Exception:
+            return "未装"
+
+    print("== material-parser 当前生效配置（—— 后是它在技能里的角色）==")
+    print(f"Python        ：{sys.version.split()[0]}（{sys.executable}）"
+          f"—— 全部脚本与解析流程的运行底座")
+    print(f"在线抓取      ：yt-dlp {ver('yt-dlp')} —— 在线视频的「手」：跑三级链路"
+          f"（CC字幕→AI字幕→下载），把链接变成字幕或音视频文件；分段并发 8、短链预解析、"
+          f"/note/ 重写内置；--cookies 接浏览器名或 cookies.txt，按站点自动挑 <技能目录>/cookies/*.txt")
+    print(f"本地转写引擎  ：faster-whisper {ver('faster-whisper')} —— 没字幕时的「耳朵」："
+          f"把音频听成文字（链路第 3 级兜底）；批处理默认开（--no-batched 关），模型默认 small")
+    try:
+        import ctranslate2
+        n = ctranslate2.get_cuda_device_count()
+        gpu = f"检测到 {n} 个 CUDA 设备" if n else "未检测到 NVIDIA GPU"
+    except Exception:
+        gpu = "ctranslate2 未装，无法探测"
+    print(f"转写设备      ：默认 auto —— {gpu}；有卡即 GPU（int8_float16），无卡/初始化失败自动回落 "
+          f"CPU（int8）并说明 —— 决定转写跑 GPU 还是 CPU；显式 --device cpu/cuda 语义不变")
+    ff = find_tool("ffmpeg")
+    print(f"ffmpeg        ：{ff or '未找到（winget install Gyan.FFmpeg）'} —— 素材加工的「刀」："
+          f"抽音轨（转写前）、抽关键帧（纯画面路线）、格式转换")
+    print(f"蒸馏          ：仓颉 cangjie 七阶段流水线 —— 长内容的「消化器」：书/课程/长访谈 "
+          f"蒸馏成方法论与可执行技能包（distill/ = cangjie-skill v2.5.0 功能子集，规范见 "
+          f"distill/蒸馏规范.md）；PyYAML {ver('pyyaml')}（缺则降级 agent 手工路线，不影响解析）")
+    try:
+        print(f"缓存根        ：{ensure_cache_root(None)} —— 收录期间的工作台：解析产物先落这里，"
+              f"入库成功即删，不是档案")
+    except Exception as e:
+        print(f"缓存根        ：未定位（{str(e)[:80]}）—— 用 --cache-root 或 MATERIAL_PARSER_CACHE 指定")
+    print("环境体检      ：common.py --doctor —— 按用途报缺什么并给安装命令；本命令只报现状不报缺失")
+    print("—— 完整工具链：必要性与可替换性（全部自配置：装没装自动检测，缺了自动降级或回落，不卡流程）——")
+    print("[A · PDF/EPUB 解析]（仅解析 PDF/EPUB 需要；整组缺 → agent 直读原件，慢速降级）")
+    print(f"  pymupdf {ver('pymupdf')} —— 文本层提取与页面渲染。替代：pdftotext 等命令行（未内置）")
+    print(f"  rapidocr {ver('rapidocr')} —— 扫描件 OCR 兜底。替代：PaddleOCR / tesseract（未内置）")
+    print(f"  Pillow {ver('Pillow')} —— OCR 图像处理 / 关键帧拼图。随 A 组与关键帧用途带入")
+    print(f"  numpy {ver('numpy')} —— OCR 图像数组底座。随 rapidocr 链带入")
+    print("[B · 转写]（仅音视频转文字需要；缺 → 无转写，作用标（待补充））")
+    print(f"  faster-whisper {ver('faster-whisper')} —— 耳朵：音频听成文字。替代：whisper.cpp / 云端 ASR（未内置）")
+    print(f"  av {ver('av')} —— 音频解码底座（faster-whisper 依赖；必须锁 <16，v16 会崩）。替代：无")
+    print("[C · 在线视频]（仅在线 URL 需要；本地文件完全不需要）")
+    print(f"  yt-dlp {ver('yt-dlp')} —— 手：三级链路（CC字幕→AI字幕→下载）。替代：无（事实标准）")
+    print("[D · 蒸馏]（仅「蒸馏 / 做成技能」需要；缺 PyYAML → agent 手工蒸馏）")
+    print(f"  pyyaml {ver('pyyaml')} —— 蒸馏脚手架读写。替代：手工路线")
+    print(f"  tiktoken {ver('tiktoken')}（可选）—— token 计数。缺了不影响流程")
+    print(f"  jsonschema {ver('jsonschema')}（可选）—— 能力卡 schema 校验。缺了不影响流程")
+    print("[GPU 加速]（纯提速，可有可无；无卡 / 缺库自动回落 CPU）")
+    print(f"  nvidia-cublas-cu12 {ver('nvidia-cublas-cu12')} / nvidia-cudnn-cu12 {ver('nvidia-cudnn-cu12')}"
+          f" —— CUDA 运行库。替代：CPU 慢跑")
+    print("[外部工具与凭据]")
+    print(f"  ffmpeg {'已装' if ff else '未装（winget install Gyan.FFmpeg）'} —— 刀：抽音轨（转写前）/ 关键帧 / 格式转换。替代：无")
+    print("  浏览器 + Get cookies.txt LOCALLY 扩展 —— cookies 获取（仅登录站点需要；B站 CC 字幕可无）")
+    print("  git —— 库的版本管理（用户自管，技能不 commit）")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--config" in sys.argv:
+        sys.exit(cmd_config())
     if "--doctor" in sys.argv:
         sys.exit(doctor())
     if "--clean" in sys.argv:
