@@ -47,7 +47,7 @@
 
 ## 安装
 
-1. 把 `knowledge-vault/` 目录整个复制进你的技能目录（或任意位置）。
+1. 把 `knowledge-vault/` 目录整个复制进你的技能目录。
 2. **库根定位**：技能默认从自身位置向上找 `大纲.md` 定位库根；装在库根之外时设环境变量 `MATERIAL_PARSER_CACHE=<库根>/解析缓存`（详见 `knowledge-vault/SKILL.md` 配置节）。
 3. **依赖全部可选**：用真实 Python 解释器跑 `material-parser/scripts/common.py --doctor`，按用途报缺哪些并给精确安装命令（完整清单见下方「工具清单」）。注意 Windows 商店版 `python` 是占位 stub 跑不起来——用实际安装路径，本机约定见 `knowledge-vault/SKILL.md` 配置节。不装也能用——agent 直接读原件，慢一些。
 4. **自检**：`python knowledge-vault/scripts/selftest.py`（四个库级脚本全合成数据自检，不碰真实库、不联网）；`python knowledge-vault/material-parser/scripts/selftest.py` 验解析子模块——后者需先能定位缓存根（在库根目录下运行，或设 `MATERIAL_PARSER_CACHE`），否则会按设计报错退出。
