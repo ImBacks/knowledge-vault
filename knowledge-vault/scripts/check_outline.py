@@ -50,6 +50,7 @@ from pathlib import Path
 
 HEADER_RE = re.compile(r"<!--\s*v(\d+)\s*｜\s*条目\s*(\d+)\s*｜\s*更新\s*([0-9\-]+)\s*-->")
 TOC_RE = re.compile(r"^-\s*(.+?)（(\d+)）\s*$")
+TOC_PARENT_RE = re.compile(r"^-\s*(.+›.+)$")
 ENTRY_RE = re.compile(r"^-\s+\*\*(.+?)\*\*(?:\s*｜\s*(.*))?$")
 RELATED_RE = re.compile(r"^-\s*相关\s*[:：]\s*(.+)$")
 
@@ -166,11 +167,14 @@ def main() -> int:
 
     # ---------- 2. 目录 ----------
     toc = []
+    toc_parent = None  # 最近一条大类行「库 › 大类」，供缩进子类行拼全路径
     in_toc = False
     for i, ln in enumerate(lines, 1):
         s = ln.strip()
         if s.startswith("## "):
             in_toc = (s[3:].strip() == "目录")
+            if in_toc:
+                toc_parent = None
             continue
         if in_toc:
             if s.startswith("#"):
@@ -178,7 +182,21 @@ def main() -> int:
                 continue
             m = TOC_RE.match(s)
             if m:
-                toc.append((m.group(1).strip(), int(m.group(2)), i))
+                path = m.group(1).strip()
+                if "›" not in path:
+                    if not toc_parent:
+                        hard.append(f"目录第 {i} 行「{path}（{m.group(2)}）」缺所属大类行")
+                        continue
+                    path = f"{toc_parent} › {path}"  # 缩进子类行拼全路径
+                else:
+                    segs = [p.strip() for p in path.split("›")]
+                    if len(segs) >= 2:
+                        toc_parent = " › ".join(segs[:2])  # 全路径行刷新大类
+                toc.append((path, int(m.group(2)), i))
+            else:
+                pm = TOC_PARENT_RE.match(s)
+                if pm:
+                    toc_parent = pm.group(1).strip()
     toc_total = sum(c for _, c, _ in toc)
     print(f"目录：{len(toc)} 行，合计声明 {toc_total} 条")
 
