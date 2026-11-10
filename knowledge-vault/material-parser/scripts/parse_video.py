@@ -4,7 +4,8 @@
 用法：
     python scripts/parse_video.py <视频/音频路径 或 URL>
         [--model small] [--language zh] [--chunk-sec 600] [--keyframes]
-        [--no-transcribe] [--max-frames 120] [--cue-words 词1,词2] [--keep-audio]
+        [--no-transcribe] [--max-frames 120] [--cue-words 词1,词2] [--ocr auto|off]
+        [--ocr-min-score 0.5] [--keep-audio]
         [--device cpu|cuda] [--cookies chrome|edge|firefox|brave] [--force] [--cache-root 目录]
 
 在线视频三级链路（yt-dlp 支持的站点均可：B站/抖音/TikTok/YouTube 等）：
@@ -23,8 +24,15 @@
     两路去重合并、封顶 --max-frames；锚点优先保住，场景帧均匀填充。
     --no-transcribe：无口播/纯画面展示类视频跳过字幕与转写，只出关键帧（需配合 --keyframes）。
 
+画面文字（--keyframes 之后自动跟做，--ocr off 关；帧不为 OCR 多抽一遍）：
+    对已抽出的关键帧逐帧 RapidOCR，落 ocr/ocr.txt——按时间轴列出每帧文字，锚点帧排在前面，
+    末尾汇总画面里出现的链接/域名（"视频没念出链接"时不用只靠肉眼看拼图）。字面量机械转录，
+    语义理解（这画面说明什么）仍归调用方；逐帧断点 keyframes/ocr_frames.jsonl，中断可续。
+    依赖 rapidocr（装了 parse_pdf 就有），没装自动跳过并提示。
+
 产物（解析缓存/<名>-<sha1前10位>/）：
     概览.md / chunks/chunk-NN.md（带 [HH:MM:SS] 标记）/ transcript.srt / segments.jsonl / keyframes/（可选）
+    / ocr/ocr.txt（可选，画面文字）
 
 断点续跑：转写段落逐条追加 segments.jsonl，中断后重跑同一命令自动续。
 中间 wav / 下载的媒体在转写成功后默认删除（GB 级），中断时保留供续跑；--keep-audio 可保留。
@@ -567,7 +575,17 @@ def ensure_keyframes(cache_dir: Path, manifest, args, is_url, url, src_path):
     --max-frames 变化会重抽（要的还是同一批画面，只是封顶不同）；--cue-words 换词需 --force。"""
     kf_info = manifest.get("keyframes") or {}
     redo = args.force or (kf_info.get("done") and args.max_frames != kf_info.get("max_frames"))
-    if not args.keyframes or (kf_info.get("done") and not redo):
+    if not args.keyframes:
+        if (manifest.get("ocr") or {}).get("done"):
+            print("ℹ 注意：本次未开 --keyframes，画面文字（ocr.txt）沿用上次抽帧结果；"
+                  "要补关键帧用 --keyframes")
+        return
+    if kf_info.get("done") and not redo:
+        # --force 时帧不重抽（画面还是那批），但要落到下面重做 OCR 与产物
+        if not args.force and args.ocr != "off" and not (manifest.get("ocr") or {}).get("done"):
+            print("  关键帧已在：补做画面文字识别（之前没跑 OCR，或那次是 --ocr off）…")
+            ensure_ocr(cache_dir, manifest, args)
+            C.save_manifest(cache_dir, manifest)
         return
     segments = read_segments(cache_dir / "segments.jsonl") or None  # 锚点用：字幕/转写均可
     if is_url:
@@ -583,7 +601,199 @@ def ensure_keyframes(cache_dir: Path, manifest, args, is_url, url, src_path):
     else:
         extract_keyframes(src_path, cache_dir, manifest, segments=segments,
                           max_frames=args.max_frames, cue_words=parse_cue_words(args.cue_words))
+    ensure_ocr(cache_dir, manifest, args)
     C.save_manifest(cache_dir, manifest)
+
+
+# ---------------------------------------------------------------- 画面文字（OCR）
+
+OCR_VERSION = 1  # 抽帧逻辑变化时 +1，旧 ocr.txt 自动作废
+
+
+def make_ocr():
+    """兼容新旧两代 RapidOCR（与 parse_pdf.make_ocr 同一套双包写法）：
+    rapidocr v2+ 返回 .txts/.scores/.boxes；rapidocr_onnxruntime v1 返回 (list, elapse)。
+    返回 f(图路径) -> [(解码文本, 置信度, 字框数)]。"""
+    try:
+        from rapidocr import RapidOCR  # v2/v3 统一包
+        engine = RapidOCR()
+
+        def run(path):
+            out = engine(str(path))
+            txts = getattr(out, "txts", None) or ()
+            scores = getattr(out, "scores", None) or ()
+            boxes = getattr(out, "boxes", None)
+            n = len(txts)
+            return [(txts[i], float(scores[i]) if i < len(scores) else 0.0,
+                     len(boxes[i]) if boxes is not None and i < len(boxes) else 0)
+                    for i in range(n)]
+        return run
+    except ImportError:
+        from rapidocr_onnxruntime import RapidOCR  # v1 旧包（Py≤3.12）
+        engine = RapidOCR()
+
+        def run(path):
+            result, _ = engine(str(path))
+            return [(str(line[1]), float(line[2]) if len(line) > 2 else 0.0, len(line[0]))
+                    for line in (result or [])]
+        return run
+
+
+def ocr_frames(frames, ocr, jsonl: Path, min_score=0.5, min_chars=2):
+    """逐帧 OCR，按帧落盘断点（jsonl 一行一帧，中断重跑只补缺帧）。
+    返回 ({帧文件名: 文本}, {帧文件名: 低置信度原文})——后者是识别到但没过阈值的字，
+    仅作「这一帧有字没认干净」的提示，不进正文。"""
+    done, low = {}, {}
+    if jsonl.exists():
+        for line in jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                done[rec["frame"]] = rec.get("text", "")
+                if rec.get("low"):
+                    low[rec["frame"]] = rec["low"]
+            except Exception:
+                continue
+    todo = [f for f in frames if f.name not in done]
+    if todo:
+        print(f"  画面文字 OCR：{len(todo)} 帧待识别（已有 {len(done)} 帧，约 0.2~1 秒/帧）…")
+        with open(jsonl, "a", encoding="utf-8") as fh:
+            for i, f in enumerate(todo, 1):
+                try:
+                    hits = ocr(f)
+                except Exception as e:  # 单帧失败不拖垮整条链路
+                    print(f"  ⚠ 第 {i} 帧 OCR 失败（{type(e).__name__}），留空继续")
+                    hits = []
+                lines, seen, faint = [], set(), []
+                for text, score, nbox in hits:
+                    text = " ".join(str(text).split())
+                    if not text:
+                        continue
+                    accepted = (score >= min_score and text not in seen
+                                and not (len(text) < min_chars and nbox < 2))
+                    if accepted:
+                        seen.add(text)
+                        lines.append(text)
+                    else:
+                        faint.append(text)
+                done[f.name] = "\n".join(lines)
+                if faint:
+                    low[f.name] = " / ".join(dict.fromkeys(faint))
+                rec = {"frame": f.name, "text": done[f.name]}
+                if low.get(f.name):
+                    rec["low"] = low[f.name]
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                fh.flush()
+                if i % 20 == 0:
+                    print(f"    OCR 进度：{i}/{len(todo)} 帧")
+    return done, low
+
+
+def write_ocr_txt(cache_dir: Path, manifest, frames, times, kinds, ocr_dir_path: Path):
+    """画面文字按时间轴落到 ocr/ocr.txt：锚点（讲述指向画面）优先，其余按时间。
+    这是字面量的机械转录——画面独有事实（URL/仓库名/按钮文案）从此有产物承载，
+    不必只靠 agent 看拼图记住；语义理解（这画面说明什么）仍归 agent/VLM。"""
+    kf = manifest.get("keyframes") or {}
+    files = kf.get("files") or []
+    n_ocr = sum(1 for v in manifest["ocr"]["texts"].values() if v)
+    head = [f"# 画面文字 ｜ {manifest.get('name')}", "",
+            f"- 来源：{manifest.get('source')}",
+            f"- 识别：RapidOCR 逐帧 × {len(frames)} 帧（{n_ocr} 帧有字）｜ "
+            f"路线 {route_desc(manifest.get('route'))} ｜ 生成 {C.today()}",
+            "- ⚠ 属「据识别」：字体小/反色/花屏会认错，链接与命令引用前回看原帧。",
+            "- 锚点帧 = 讲述里「看这个/如图/手上」指向画面的时刻（比普通帧更可能有信息）。", "",
+            "| 帧 | 时间 | 类型 | 文件 | 首行文字 |", "|---|---|---|---|---|"]
+    anchor_hits = []
+    for i, fp in enumerate(frames, 1):
+        t = times[i - 1] if i <= len(times) else 0.0
+        kind = (kinds[i - 1] if i <= len(kinds) else "场景")
+        text = manifest["ocr"]["texts"].get(fp.name, "")
+        ts = C.fmt_ts(t)
+        head.append(f"| {i} | {ts} | {kind} | {fp.name} | {text.splitlines()[0][:60] if text else '（无文字）'} |")
+        links = re.findall(r"(?:https?://)?(?:[a-zA-Z0-9-]+\.)+(?:com|cn|net|org|io|dev|ai|app|xyz|me|cc)"
+                           r"(?:/[^\s，。、）」』]*)?", text)
+        for lk in dict.fromkeys(links):
+            anchor_hits.append((ts, kind, lk, fp.name))
+    head += ["", "## 全部识别文字（按时间轴；锚点排在前面）", ""]
+    order = sorted(range(len(frames)),
+                   key=lambda i: (0 if (kinds[i] if i <= len(kinds) else "") == "锚点" else 1,
+                                  times[i] if i < len(times) else 0))
+    for i in order:
+        fp = frames[i]
+        t = times[i] if i < len(times) else 0.0
+        kind = kinds[i] if i <= len(kinds) else "场景"
+        ts = C.fmt_ts(t)
+        mark = " ★锚点" if kind == "锚点" else ""
+        head += [f"### [{ts}]{mark} {fp.name}", ""]
+        text = manifest["ocr"]["texts"].get(fp.name, "")
+        head += (text.splitlines() if text else ["（无文字）"]) + [""]
+    if anchor_hits:
+        head += ["## 画面里出现的链接/域名", "", "| 时间 | 类型 | 文字 | 帧 |", "|---|---|---|---|"]
+        head += [f"| {ts} | {k} | {lk} | {fn} |" for ts, k, lk, fn in anchor_hits]
+        head += ["", "> 链接需与视频内容对得上（名字一致、作用吻合）才可直接入库；"
+                     "状态栏/弹幕里游客串的地址另论。", ""]
+    # 低置信度小字：识别到但被 --ocr-min-score 滤掉的，说明画面里确实有字、只是没认干净。
+    # 场景小字（路牌/字幕条/角标）最容易这样丢——点出来让调用方知道该回看哪一帧。
+    faint = [(i, fp.name) for i, fp in enumerate(frames, 1)
+             if ((manifest["ocr"].get("low") or {}).get(fp.name) or "").strip()]
+    if faint:
+        head += ["## 低置信度小字（未计入正文，建议回看）", "",
+                 "> 画面里检测到字，但置信度低于阈值或字形太小没认全——"
+                 "若这条视频的关键信息在路牌/角标/小字说明上，把该帧放大或裁切后再看。", "",
+                 "| 帧 | 时间 | 文件 | 低置信度原文（可能有误） |", "|---|---|---|---|"]
+        for i, name in faint:
+            t = times[i - 1] if i <= len(times) else 0.0
+            raw = " ".join((manifest["ocr"]["low"].get(name) or "").split())[:80]
+            head.append(f"| {i} | {C.fmt_ts(t)} | {name} | {raw} |")
+        head.append("")
+    ocr_dir_path.mkdir(exist_ok=True)
+    (ocr_dir_path / "ocr.txt").write_text("\n".join(head) + "\n", encoding="utf-8")
+    return len(anchor_hits)
+
+
+def ensure_ocr(cache_dir: Path, manifest, args):
+    """可选的叠加产物：--keyframes 抽过帧后才谈画面文字（帧不是为 OCR 再多抽一遍）。
+    缓存键 = 帧清单 + min_score + OCR_VERSION；参数不变秒回。"""
+    if not (manifest.get("keyframes") or {}).get("done"):
+        manifest.pop("ocr", None)
+        return
+    kf = manifest["keyframes"]
+    frames = [cache_dir / "keyframes" / n for n in kf.get("files", [])]
+    frames = [f for f in frames if f.exists()]
+    if not frames:
+        return
+    key = C.text_sha1(json.dumps([f.name for f in frames], sort_keys=True)
+                      + f"|{args.ocr_min_score}|{OCR_VERSION}")
+    info = manifest.get("ocr") or {}
+    if not args.force and info.get("done") and info.get("key") == key:
+        t = info.get("texts") or {}
+        print(f"  画面文字：沿用缓存（{len(t)} 帧，有字 {sum(1 for v in t.values() if v)} 帧）")
+        return
+    if args.ocr == "off":
+        print("ℹ --ocr off：跳过画面文字识别（只出关键帧图）")
+        manifest.pop("ocr", None)
+        return
+    try:
+        ocr = make_ocr()
+    except ImportError:
+        print("⚠ 未装 OCR（rapidocr），跳过画面文字：pip install rapidocr Pillow numpy；"
+              "或加 --ocr off 明确关掉这条提示")
+        return
+    t0 = time.time()
+    jsonl = cache_dir / "keyframes" / "ocr_frames.jsonl"
+    if jsonl.exists() and (info.get("key") != key):
+        jsonl.unlink(missing_ok=True)  # 抽帧参数变了 → 逐帧断点作废
+    texts, lows = ocr_frames(frames, ocr, min_score=args.ocr_min_score, jsonl=jsonl)
+    manifest["ocr"] = {"done": True, "key": key, "min_score": args.ocr_min_score,
+                       "engine": "rapidocr", "frames": len(frames),
+                       "with_text": sum(1 for v in texts.values() if v),
+                       "texts": texts, "low": lows}
+    links = write_ocr_txt(cache_dir, manifest, frames, kf.get("times") or [],
+                          kf.get("kinds") or [], cache_dir / "ocr")
+    print(f"  画面文字：{len(frames)} 帧 OCR 完成（有字 {manifest['ocr']['with_text']} 帧，"
+          f"链接 {links} 条，{time.time() - t0:.1f} 秒）→ ocr/ocr.txt")
 
 
 # ---------------------------------------------------------------- 产物
@@ -655,6 +865,14 @@ def write_overview_video(cache_dir: Path, manifest, display, args, route, chunks
             fname = files[i - 1] if i <= len(files) else "-"
             lines.append(f"| {i} | {C.fmt_ts(t)} | {kind} | keyframes/{fname} |")
         lines.append("")
+    oc = manifest.get("ocr") or {}
+    if oc.get("done"):
+        lines += [f"## 画面文字（{oc.get('with_text', 0)}/{oc.get('frames', 0)} 帧有字）", "",
+                  "逐帧 OCR 结果见 ocr/ocr.txt（按时间轴列全文，锚点帧在前，末尾汇总画面里的链接）。"
+                  "⚠ 文字属「据识别」，链接/命令引用前回看原帧。", ""]
+    elif kf.get("done"):
+        lines += ["## 画面文字", "",
+                  "- 本次未做画面文字识别（未装 rapidocr，或 --ocr off）：只出关键帧图，需看图理解画面。", ""]
     lines += [f"- SRT：transcript.srt ｜ 原始段落：segments.jsonl",
               "- 正文引用一律指向原视频 + 时间戳（[HH:MM:SS] 标记），不要指向本缓存目录。"]
     (cache_dir / "概览.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -693,6 +911,11 @@ def main():
                     help=f"关键帧封顶数（默认 120；数百页幻灯片录像可放宽，如 --max-frames 300）")
     ap.add_argument("--cue-words", default=None,
                     help="讲述锚点词表（逗号分隔），按视频内容自定；传空串禁用锚定，默认用内置表")
+    ap.add_argument("--ocr", default="auto", choices=["auto", "off"],
+                    help="抽帧后识别画面文字（RapidOCR，给录屏/讲义/代码画面用；CPU 约 0.2~1 秒/帧）。"
+                         "默认 auto：装了 rapidocr 就识别，没装跳过并提示；off 只出关键帧图")
+    ap.add_argument("--ocr-min-score", type=float, default=0.5,
+                    help="画面文字置信度下限（默认 0.5，越低越宽召回但杂字多）")
     ap.add_argument("--keep-audio", action="store_true", help="保留中间 wav / 下载的媒体文件")
     ap.add_argument("--cookies", default=None,
                     help="登录态来源：浏览器名（chrome/edge/firefox/brave，需已登录）或 cookies.txt "

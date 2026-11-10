@@ -28,7 +28,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from cangjie_common import TOOL_VERSION, dump_json, load_yaml  # noqa: E402
-from compile_single import active_capabilities, build_tree, promoted_capabilities, write_tree  # noqa: E402
+from compile_single import (active_capabilities, build_tree, capability_resources,
+                            promoted_capabilities, resource_links, write_tree)  # noqa: E402
 
 
 def build_promoted_skill_md(cap: dict, bundle: dict, card_text: str) -> str:
@@ -81,10 +82,12 @@ def compile_pack_tree(bundle_dir: Path, *, allow_over_budget: bool = False) -> d
     # 晋级 Skill：自包含，不引用跨目录路径（不变量 3 由内容构造保证 + 校验兜底）
     for cap in promoted:
         card_text = (bundle_dir / cap["card"]).read_text(encoding="utf-8")
-        skill_md = build_promoted_skill_md(cap, bundle, card_text)
+        skill_md = build_promoted_skill_md(cap, bundle, card_text) + resource_links(cap)
         if "references/capabilities/" in skill_md or f"../{router_name}" in skill_md:
             raise SystemExit(f"[invariant] 晋级 Skill {cap['slug']} 引用了跨目录路径，必须自包含")
         files[f"{cap['slug']}/SKILL.md"] = skill_md
+        for rel, content in capability_resources(bundle_dir, cap).items():
+            files[f"{cap['slug']}/{rel}"] = content
 
     # 不变量 2：未晋级能力在路由入口可达
     for cap in caps:

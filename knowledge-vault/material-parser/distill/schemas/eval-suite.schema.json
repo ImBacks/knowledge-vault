@@ -43,10 +43,19 @@
               "type": "object",
               "required": ["kind", "value"],
               "properties": {
-                "kind": { "enum": ["contains", "not_contains", "regex", "file_exists", "json_path"] },
+                "kind": { "enum": ["contains", "not_contains", "regex", "file_exists", "json_path", "json_equals", "json_number"] },
                 "value": { "type": "string" },
+                "expected": { "description": "json_equals 的精确值或 json_number 的目标数值" },
+                "abs_tol": { "type": "number", "minimum": 0, "default": 0 },
+                "rel_tol": { "type": "number", "minimum": 0, "default": 0 },
                 "note": { "type": "string" }
-              }
+              },
+              "allOf": [
+                { "if": { "properties": { "kind": { "enum": ["json_equals", "json_number"] } } },
+                  "then": { "required": ["expected"] } },
+                { "if": { "properties": { "kind": { "const": "json_number" } } },
+                  "then": { "properties": { "expected": { "type": "number" } } } }
+              ]
             }
           },
           "compare_against": { "type": "array", "items": { "enum": ["old_skill", "without_skill"] } }

@@ -22,6 +22,13 @@
     "keywords": { "type": "array", "minItems": 1, "items": { "type": "string" } },
     "also_read": { "type": "array", "items": { "type": "string" }, "default": [] },
     "card": { "type": "string", "description": "能力卡正文相对路径（bundle 内），R/I/A1/A2/E/B 六段", "pattern": "^cards/[a-z0-9-]+\\.md$" },
+    "resources": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "显式随包交付的 UTF-8 脚本/CSV/JSON/Markdown 模板，相对 Bundle 与输出 Skill 根目录。禁止符号链接、越界、二进制；编译只复制不执行。",
+      "items": { "type": "string", "pattern": "^resources/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*$" },
+      "default": []
+    },
     "frontmatter": {
       "type": "object",
       "description": "晋级为独立 Skill 时使用的 frontmatter 数据（description/tags 等）",

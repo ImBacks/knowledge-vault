@@ -56,10 +56,11 @@ def init_paths():
 RESULTS = []
 
 
-def report(test, ok, msg=""):
-    mark = "✅" if ok else "❌"
+def report(test, ok, msg="", skip=False):
+    """skip=True：环境不满足（如系统无中文语音），不算失败也不冒充通过——单独计一档。"""
+    mark = "⏭️" if skip else ("✅" if ok else "❌")
     print(f"  {mark} {test}" + (f" ｜ {msg}" if msg else ""))
-    RESULTS.append((test, ok, msg))
+    RESULTS.append((test, ok, msg, skip))
 
 
 def run_script(script, *args, env_extra=None, timeout=1800):
@@ -277,6 +278,12 @@ TTS_TEXT = ("知识管理需要定期整理。今天天气很好，阳光明媚�
 
 
 def make_tts_wav(wav_path: Path, text=None) -> bool:
+    """合成中文 wav；系统无可用中文语音返回 False（调用方跳过本组）。
+
+    注意：SelectVoice/Speak 的失败是 PowerShell **非终止性错误**——进程退出码仍是 0，
+    只是 wav 为空。因此必须按产物大小判定，不能只看 returncode（否则"空 wav"会一路
+    走到解析端被当成"无音轨"吞掉，报成误导性的'断点 0 行'失败）。
+    """
     ps = """
 Add-Type -AssemblyName System.Speech
 $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
@@ -288,13 +295,16 @@ $s.SetOutputToWaveFile('WAVPATH')
 $s.Speak('TTSTEXT')
 $s.Dispose()
 """.replace("WAVPATH", str(wav_path)).replace("TTSTEXT", text or TTS_TEXT)
+    wav_path.unlink(missing_ok=True)
     r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                         "-Command", ps], capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=300)
     if r.returncode == 2 or "NO_ZH_VOICE" in (r.stdout or ""):
         return False
-    if r.returncode != 0 or not wav_path.exists():
+    if r.returncode != 0:
         raise RuntimeError(f"TTS 失败：{r.stderr[-300:]}")
+    if not wav_path.exists() or wav_path.stat().st_size <= 44:
+        return False  # 语音引擎起不来（受限环境/common：No voice installed）→ 当作无语音跳过
     return True
 
 
@@ -303,7 +313,9 @@ def test_tts_transcribe():
     wav_raw = WORK / "tts_raw.wav"
     have_zh = make_tts_wav(wav_raw)
     if not have_zh:
-        report("TTS 中文 voice", False, "系统未装中文语音（Huihui 等），跳过本项 —— 请在设置添加中文语音后重跑")
+        report("TTS 中文 voice",
+               "跳过：系统无可用中文语音或被安全策略禁用（SelectVoice 报 'No voice installed…'）"
+               "——请在「设置 › 时间和语言 › 语音」添加中文语音后重跑", skip=True)
         return
 
     sha = C.file_sha1(wav_raw)
@@ -456,15 +468,16 @@ def test_visual_and_cues():
         report("route=visual、0 段、关键帧按 --max-frames=60 封顶",
                m.get("route") == "visual" and m.get("segments") == 0
                and kf.get("count") == 60,
-               f"route={m.get('route')}，segments={m.get('segments')}，count={kf.get('count')}")
+                f"route={m.get('route')}，segments={m.get('segments')}，count={kf.get('count')}")
+        _check_ocr(found[0], cut, root2)
 
     print("  讲述锚点：TTS 合成指画面语音 + testsrc 画面 → 转写命中词即抽锚点帧")
     wav_cue = WORK / "自测-锚点语音.wav"
     cue_text = ("请注意看这个界面，这里就是入口。这张图就是最终的结果。"
                 "大家看右边的数字，都在增长。知识管理需要定期整理。")
     if not make_tts_wav(wav_cue, cue_text):
-        report("TTS 中文 voice（锚点子项）", False,
-               "系统未装中文语音，跳过锚点子项——同第 3 组")
+        report("TTS 中文 voice（锚点子项）",
+               "跳过：系统无可用中文语音（同第 3 组，无需单独修）", skip=True)
         return
     v2 = WORK / "自测-锚点.mp4"
     C.run_ffmpeg(["-y", "-f", "lavfi", "-i", "testsrc=duration=20:size=640x480:rate=25",
@@ -484,6 +497,72 @@ def test_visual_and_cues():
                kf.get("cues", 0) >= 1 and "锚点" in (kf.get("kinds") or []),
                f"cues={kf.get('cues')}，kinds={sorted(set(kf.get('kinds') or []))}，"
                f"段落数={m.get('segments')}")
+
+
+def _check_ocr(cache_dir, video, root):
+    """画面文字（ocr/ocr.txt）：把切变视频的第 1 帧换成带字白板，重跑纯画面 → 校验 OCR 产物。
+    没装 rapidocr 时只守「--ocr off 不出产物、不报错」这条降级路径。"""
+    print("  画面文字：带字白板视频 → --keyframes 后自动 OCR 落 ocr/ocr.txt")
+    try:
+        import rapidocr  # noqa: F401  v2+ 统一包
+        has_ocr = True
+    except ImportError:
+        try:
+            import rapidocr_onnxruntime  # noqa: F401  v1 旧包
+            has_ocr = True
+        except ImportError:
+            has_ocr = False
+
+    from PIL import Image, ImageDraw, ImageFont
+    png = WORK / "自测-白板.png"
+    img = Image.new("RGB", (1280, 720), "white")
+    d = ImageDraw.Draw(img)
+    font = None
+    for fp in (r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\arial.ttf"):
+        try:
+            font = ImageFont.truetype(fp, 34)
+            break
+        except Exception:
+            continue
+    d.text((60, 80), "selftest ocr 123", fill="black", font=font)
+    d.text((60, 180), "https://github.com/kangarooking/cangjie-skill", fill="black", font=font)
+    img.save(png)
+    txt = WORK / "自测-白板.mp4"
+    C.run_ffmpeg(["-y", "-loop", "1", "-t", "2", "-i", str(png), "-vf", "format=yuv420p",
+                  "-r", "5", str(txt)], capture=True)
+    root3 = CACHE / "ocrroot"
+    r = run_script("parse_video.py", str(txt), "--cache-root", str(root3),
+                   "--no-transcribe", "--keyframes", "--max-frames", "6")
+    if r.returncode != 0:
+        report("画面文字视频解析成功", False, (r.stderr or "")[-300:])
+        return
+    report("画面文字视频解析成功", True)
+    found = C.find_cache_by_sha1(root3, C.file_sha1(txt))
+    m = read_manifest(found[0])
+    ocr_txt = found[0] / "ocr" / "ocr.txt"
+    if not has_ocr:
+        report("未装 OCR 时跳过画面文字（无产物、不报错）", not ocr_txt.exists() and not m.get("ocr"))
+        return
+    body = ocr_txt.read_text(encoding="utf-8") if ocr_txt.exists() else ""
+    texts = (m.get("ocr") or {}).get("texts") or {}
+    joined = "\n".join(texts.values())
+    report("ocr/ocr.txt 生成且带时间轴表头", ocr_txt.exists() and "| 帧 | 时间 | 类型 |" in body)
+    report("画面文字被识别（含 ocr 与 github 域名）",
+           "ocr" in joined.lower() and "github" in joined.lower(),
+           joined[:200] or "manifest.ocr.texts 为空")
+    report("链接汇总表命中画面里的地址", "github.com/kangarooking" in body,
+           "ocr/ocr.txt 的「画面里出现的链接」段没抓到 github 地址")
+    kf = m.get("keyframes") or {}
+    report("manifest.ocr 记录帧数/有字帧数",
+           (m.get("ocr") or {}).get("done") and (m.get("ocr") or {}).get("frames") == kf.get("count"))
+
+    print("  画面文字复用：同一缓存再跑（不加 --force）→ 不重跑 OCR")
+    r = run_script("parse_video.py", str(txt), "--cache-root", str(root3),
+                   "--no-transcribe", "--keyframes", "--max-frames", "6")
+    report("OCR 结果随缓存复用（不重识别）",
+           r.returncode == 0 and "沿用缓存" not in (r.stdout or "")
+           and "帧待识别" not in (r.stdout or ""),
+           (r.stdout or "")[-300:])
 
 
 # ---------------------------------------------------------------- 5. 离线字幕桩
@@ -694,9 +773,13 @@ def main():
     test_config_view()
 
     ok = [x for x in RESULTS if x[1]]
-    bad = [x for x in RESULTS if not x[1]]
-    print(f"\n{'=' * 60}\n自测结果：{len(ok)} 通过 / {len(bad)} 失败 ｜ 总耗时 {time.time() - t0:.0f} 秒")
-    for name, _, msg in bad:
+    skipped = [x for x in RESULTS if not x[1] and x[3]]
+    bad = [x for x in RESULTS if not x[1] and not x[3]]
+    tail = f" / {len(skipped)} 跳过（环境不满足）" if skipped else ""
+    print(f"\n{'=' * 60}\n自测结果：{len(ok)} 通过{tail} / {len(bad)} 失败 ｜ 总耗时 {time.time() - t0:.0f} 秒")
+    for name, _, msg, _ in skipped:
+        print(f"  ⏭️ {name} ｜ {msg}")
+    for name, _, msg, _ in bad:
         print(f"  ❌ {name} ｜ {msg}")
     if not bad and not args.keep:
         shutil.rmtree(WORK, ignore_errors=True)

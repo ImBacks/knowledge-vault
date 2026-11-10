@@ -51,12 +51,57 @@ def promoted_capabilities(bundle: dict) -> list[dict]:
     return [c for c in active_capabilities(bundle) if c.get("promotion", {}).get("destination") == "promoted"]
 
 
+def capability_resources(bundle_dir: Path, cap: dict) -> dict[str, str]:
+    """只打包显式声明的 UTF-8 资源，不跟随符号链接、不执行脚本。"""
+    resources = cap.get("resources", [])
+    if not isinstance(resources, list) or any(not isinstance(p, str) for p in resources):
+        raise ValueError("resources 必须是相对文件路径列表")
+    if len(set(resources)) != len(resources):
+        raise ValueError("resources 不能重复声明同一路径")
+    files = {}
+    for rel in resources:
+        # 采用可移植的受限路径，既防越界，也使生成的 Markdown 链接无歧义。
+        if not re.fullmatch(r"resources/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", rel):
+            raise ValueError(f"无效资源路径（必须在 resources/ 下）: {rel!r}")
+        path = bundle_dir / rel
+        cur = bundle_dir
+        for part in Path(rel).parts:
+            cur = cur / part
+            if cur.is_symlink():
+                raise ValueError(f"资源不能是符号链接: {rel}")
+        if not path.resolve().is_relative_to(bundle_dir.resolve()) or not path.is_file():
+            raise ValueError(f"资源不存在、不是文件或越界: {rel}")
+        try:
+            content = path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"当前只支持 UTF-8 文本资源: {rel}") from exc
+        if "\x00" in content:
+            raise ValueError(f"不支持二进制资源: {rel}")
+        files[rel] = content
+    return files
+
+
+def resource_links(cap: dict, prefix: str = "") -> str:
+    if not cap.get("resources"):
+        return ""
+    lines = ["", "## 配套资源", "", "路径相对于本文件；脚本需先检查运行条件，不因附带而自动执行。", ""]
+    lines.extend(f"- [{rel}]({prefix}{rel})" for rel in cap["resources"])
+    return "\n".join(lines) + "\n"
+
+
 def router_table(caps: list[dict], variant: str) -> str:
+    # also_read 双契约兼容：methodology/05 未约束条目格式，实际存在 slug 与 capability_id
+    # 两种写法；capability_id 自动映射为 slug，slug 原样通过
+    id_to_slug = {c["capability_id"]: c["slug"] for c in caps}
+
+    def _ref(entry: str) -> str:
+        return f"references/capabilities/{id_to_slug.get(entry, entry)}.md"
+
     rows = ["| 用户意图 | 先读 | 补读/备注 |", "|---|---|---|"]
     for cap in caps:
         intents = "；".join(cap["intents"])
         card = f"references/capabilities/{cap['slug']}.md"
-        extra = "、".join(f"references/capabilities/{s}.md" for s in cap.get("also_read", [])) or "—"
+        extra = "、".join(_ref(s) for s in cap.get("also_read", [])) or "—"
         if variant == "router" and cap.get("promotion", {}).get("destination") == "promoted":
             extra = f"已晋级为独立 Skill `{cap['slug']}`（已安装时优先直接使用；本卡仅作原文与背景补充）"
         rows.append(f"| {intents} | {card} | {extra} |")
@@ -149,7 +194,9 @@ def build_tree(bundle_dir: Path, variant: str) -> dict[str, str]:
     files: dict[str, str] = {}
     files["SKILL.md"] = build_entry_md(bundle, variant)
     for cap in caps:
-        files[f"references/capabilities/{cap['slug']}.md"] = (bundle_dir / cap["card"]).read_text(encoding="utf-8")
+        files.update(capability_resources(bundle_dir, cap))
+        files[f"references/capabilities/{cap['slug']}.md"] = (
+            (bundle_dir / cap["card"]).read_text(encoding="utf-8") + resource_links(cap, "../../"))
     files["references/capability-index.md"] = build_index_md(caps)
     files["references/cheatsheet.md"] = build_cheatsheet_md(caps, bundle["book"])
 
@@ -165,7 +212,7 @@ def write_tree(files: dict[str, str], out: Path) -> None:
     for rel, content in files.items():
         p = out / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        p.write_bytes(content.encode("utf-8"))
 
 
 def main() -> int:

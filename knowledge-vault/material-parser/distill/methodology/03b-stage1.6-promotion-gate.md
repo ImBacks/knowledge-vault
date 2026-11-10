@@ -25,6 +25,7 @@
 ## 执行步骤
 
 1. 对 `verified.md` 中每个单元逐条评审五条判据,记录布尔结果与一句话理由;
+   `reference` / `needs_review` 不进入晋级门；前者落实到参考文件，后者先补来源/条件/验证。单处完整机制通过新版三关后与其他 verified 候选平等参与，不因语境数量再被拦截。
 2. 把结果写入 Capability Bundle（`verified.yaml`）中该能力的 `promotion` 字段:
    - 通过 → `destination: promoted`
    - 未通过 → `destination: router`（保留为能力卡,经来源路由入口访问）
